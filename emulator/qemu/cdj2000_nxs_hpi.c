@@ -754,6 +754,15 @@ static bool dsp_write(void *opaque, uint32_t address, uint64_t value,
     return true;
 }
 
+/* cdj_c674x_fetch fast path: dsp_memory_span covers exactly dsp_read's RAM
+ * windows, which are disjoint from every peripheral, and a 32-byte-aligned
+ * block lies wholly inside one window or is refused (then fetch uses
+ * dsp_read). */
+static const uint8_t *dsp_fetch_block(void *opaque, uint32_t block)
+{
+    return dsp_memory_span(opaque, block, 32);
+}
+
 static void dsp_cycle_tick(void *opaque)
 {
     NxsHpi *s = opaque;
@@ -1007,6 +1016,7 @@ void cdj_nxs_hpi_init(MemoryRegion *system, void (*hint)(void *, bool), void *op
     }
     nxs_hpi = s;
     cdj_c674x_loop_set_functional_timing(timing && !strcmp(timing, "1"));
+    cdj_c674x_set_fetch_block(dsp_read, dsp_fetch_block);
     s->functional_audio = audio && !strcmp(audio, "1");
     const char *tx_path = getenv("CDJ_NXS_DSP_TX_CAPTURE");
     if (tx_path && *tx_path) {
