@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include <stddef.h>
+#include <stdatomic.h>
 #include <string.h>
 #include "cdj_c674x.h"
 #include "cdj_c674x_multicycle.h"
@@ -417,7 +418,7 @@ static unsigned instruction_unit(const CdjC674xInstruction *insn)
     return 0;
 }
 
-typedef struct { CdjC674x *cpu; unsigned mask; bool unknown; } LoopMask;
+typedef struct { const CdjC674x *cpu; unsigned mask; bool unknown; } LoopMask;
 static bool compact_branch(const CdjC674xInstruction *i)
 {
     unsigned w = i->word;
@@ -564,6 +565,42 @@ static bool stop(CdjC674x *cpu, uint32_t pc, uint32_t word, const char *why)
     return false;
 }
 
+
+/* Every queue append goes through these.  They save the slot's previous bytes
+ * into the pre-packet state first, so an in-place packet that later fails can
+ * put back exactly what a discarded scratch copy would have left.  Callers
+ * check capacity before appending. */
+static CdjC674xLoad *append_load(CdjC674x *old, CdjC674x *out)
+{
+    unsigned j = out->load_count++;
+    memcpy(&old->loads[j], &out->loads[j], sizeof(old->loads[j]));
+    return &out->loads[j];
+}
+
+static CdjC674xStore *append_store(CdjC674x *old, CdjC674x *out)
+{
+    unsigned j = out->store_count++;
+    memcpy(&old->stores[j], &out->stores[j], sizeof(old->stores[j]));
+    return &out->stores[j];
+}
+
+/* Copy [0, offsetof(loop)) except queue slots at or past the given extents. */
+static unsigned umax(unsigned a, unsigned b) { return a > b ? a : b; }
+
+static void copy_prefix(CdjC674x *to, const CdjC674x *from, unsigned stores,
+                        unsigned loads)
+{
+    memcpy(to, from, offsetof(CdjC674x, stores));
+    memcpy(to->stores, from->stores, stores * sizeof(to->stores[0]));
+    memcpy((char *)to + offsetof(CdjC674x, store_count),
+           (const char *)from + offsetof(CdjC674x, store_count),
+           offsetof(CdjC674x, loads) - offsetof(CdjC674x, store_count));
+    memcpy(to->loads, from->loads, loads * sizeof(to->loads[0]));
+    memcpy((char *)to + offsetof(CdjC674x, load_count),
+           (const char *)from + offsetof(CdjC674x, load_count),
+           offsetof(CdjC674x, loop) - offsetof(CdjC674x, load_count));
+}
+
 bool cdj_c674x_interrupt(CdjC674x *cpu, uint32_t pending)
 {
     const uint32_t maskable = 0x0000fff0u;
@@ -707,9 +744,43 @@ static bool queue_branch(CdjC674x *out, uint64_t due, uint32_t target)
     return true;
 }
 
+static CdjC674xRead fetch_block_read;
+static CdjC674xFetchBlock fetch_block;
+
+void cdj_c674x_set_fetch_block(CdjC674xRead read, CdjC674xFetchBlock block)
+{
+    fetch_block_read = read;
+    fetch_block = block;
+}
+
+/* One aligned instruction-memory word, through the board's fetch block when
+ * it maps the block and through read otherwise.  cached and cached_block
+ * hold the current block for this fetch call only. */
+static bool fetch_word(CdjC674xRead read, void *opaque, uint32_t address,
+                       uint32_t *word, const uint8_t **cached,
+                       uint32_t *cached_block)
+{
+    uint32_t block = address & ~31u;
+    if (read == fetch_block_read && fetch_block) {
+        if (block != *cached_block) {
+            *cached = fetch_block(opaque, block);
+            *cached_block = block;
+        }
+        if (*cached) {
+            const uint8_t *p = *cached + (address & 31u);
+            *word = (uint32_t)p[0] | (uint32_t)p[1] << 8 |
+                    (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+            return true;
+        }
+    }
+    return read(opaque, address, word);
+}
+
 bool cdj_c674x_fetch(CdjC674x *cpu, CdjC674xRead read, void *opaque,
                      CdjC674xPacket *packet)
 {
+    const uint8_t *block_memory = NULL;
+    uint32_t block_address = 1; /* never an aligned block */
     CdjC674xPacket result = {0};
     uint32_t next = cpu->pc;
     uint32_t header = 0, header_address = 0;
@@ -725,7 +796,8 @@ bool cdj_c674x_fetch(CdjC674x *cpu, CdjC674xRead read, void *opaque,
         /* Fetch has no clock edges or writes. Reuse the side-effect-free
          * header read within this packet only; the next fetch reads anew. */
         if (!have_header || block_header != header_address) {
-            if (!read(opaque, block_header, &header))
+            if (!fetch_word(read, opaque, block_header, &header,
+                            &block_memory, &block_address))
                 return stop(cpu, next, 0, "unmapped instruction fetch");
             header_address = block_header;
             have_header = true;
@@ -742,7 +814,8 @@ bool cdj_c674x_fetch(CdjC674x *cpu, CdjC674xRead read, void *opaque,
         bool short_word = mixed && ((header >> (21 + slot)) & 1);
         if (!short_word && (next & 3))
             return stop(cpu, next, 0, "unaligned full instruction fetch");
-        if (!read(opaque, next & ~3u, &word))
+        if (!fetch_word(read, opaque, next & ~3u, &word, &block_memory,
+                        &block_address))
             return stop(cpu, next, 0, "unmapped instruction fetch");
         if (count == 8) return stop(cpu, next, word, "execute packet exceeds eight instructions");
         if (short_word) word = (word >> ((next & 2) * 8)) & 0xffff;
@@ -930,7 +1003,7 @@ static bool arm_sat_long(CdjC674xArm *x)
         if (saturated) {
             if (x->out->load_count == 40)
                 return stop(x->cpu, x->pc, x->insn->word, "delayed-status queue full");
-            x->out->loads[x->out->load_count++] = (CdjC674xLoad){
+            *append_load(x->cpu, x->out) = (CdjC674xLoad){
                 .due = x->cpu->cycles + 2, .address = 1u << x->side,
                 .size = CDJ_C674X_DELAYED_SAT
             };
@@ -960,7 +1033,7 @@ static bool arm_sat_scalar(CdjC674xArm *x)
         if (saturated) {
             if (x->out->load_count == 40)
                 return stop(x->cpu, x->pc, x->insn->word, "delayed-status queue full");
-            x->out->loads[x->out->load_count++] = (CdjC674xLoad){
+            *append_load(x->cpu, x->out) = (CdjC674xLoad){
                 .due = x->cpu->cycles + 2, .address = 1u << unit_bit,
                 .size = CDJ_C674X_DELAYED_SAT
             };
@@ -1020,7 +1093,7 @@ static bool arm_scalar_memory(CdjC674xArm *x)
             return stop(x->cpu, x->pc, x->insn->word, "unaligned or unmapped scalar memory access");
         if (is_store) {
             if (x->out->store_count == 24) return stop(x->cpu, x->pc, x->insn->word, "store queue full");
-            x->out->stores[x->out->store_count++] = (CdjC674xStore){
+            *append_store(x->cpu, x->out) = (CdjC674xStore){
                 .due = x->cpu->cycles + 3, .address = address,
                 .value = store_value, .size = encoded_size
             };
@@ -1032,7 +1105,7 @@ static bool arm_scalar_memory(CdjC674xArm *x)
                     x->out->loads[j].dst < x->dst + (pair ? 2 : 1) &&
                     x->dst < x->out->loads[j].dst + queued_result_registers(&x->out->loads[j]))
                     return stop(x->cpu, x->pc, x->insn->word, "parallel load write conflict");
-            x->out->loads[x->out->load_count++] = (CdjC674xLoad){
+            *append_load(x->cpu, x->out) = (CdjC674xLoad){
                 .due = x->cpu->cycles + 5, .address = address, .bank = x->side, .dst = x->dst,
                 .size = encoded_size, .sign_extend = !extended && (op == 2 || op == 4)
             };
@@ -1251,7 +1324,7 @@ static bool arm_mpy32(CdjC674xArm *x)
                 return stop(x->cpu, x->pc, x->insn->word,
                             "parallel delayed-result write conflict");
         }
-        x->out->loads[x->out->load_count++] = (CdjC674xLoad){
+        *append_load(x->cpu, x->out) = (CdjC674xLoad){
             .due = due,
             .value = pair ? result : (uint32_t)result,
             .bank = x->side, .dst = x->dst, .size = pair ? 16 : 0
@@ -1337,7 +1410,7 @@ static bool arm_mpy16(CdjC674xArm *x)
                 return stop(x->cpu, x->pc, x->insn->word,
                             "parallel delayed-result write conflict");
         }
-        x->out->loads[x->out->load_count++] = (CdjC674xLoad){
+        *append_load(x->cpu, x->out) = (CdjC674xLoad){
             .due = due, .value = result, .bank = x->side, .dst = x->dst,
             .size = 0
         };
@@ -1384,14 +1457,14 @@ static bool arm_smpy16(CdjC674xArm *x)
                 return stop(x->cpu, x->pc, x->insn->word,
                             "parallel delayed-result write conflict");
         }
-        x->out->loads[x->out->load_count++] = (CdjC674xLoad){
+        *append_load(x->cpu, x->out) = (CdjC674xLoad){
             .due = due,
             .value = packed ? ((uint64_t)high.value << 32) | low.value
                             : low.value,
             .bank = x->side, .dst = x->dst, .size = packed ? 16u : 0u
         };
         if (saturated)
-            x->out->loads[x->out->load_count++] = (CdjC674xLoad){
+            *append_load(x->cpu, x->out) = (CdjC674xLoad){
                 .due = due + 1, .address = 1u << (4 + x->side),
                 .size = CDJ_C674X_DELAYED_SAT
             };
@@ -1430,7 +1503,7 @@ static bool arm_mpy_half32(CdjC674xArm *x)
                 return stop(x->cpu, x->pc, x->insn->word,
                             "parallel delayed-result write conflict");
         }
-        x->out->loads[x->out->load_count++] = (CdjC674xLoad){
+        *append_load(x->cpu, x->out) = (CdjC674xLoad){
             .due = due, .value = result, .bank = x->side, .dst = x->dst,
             .size = pair ? 16 : 0
         };
@@ -1453,7 +1526,7 @@ static bool arm_mvd(CdjC674xArm *x)
                 x->out->loads[j].dst <= x->dst && x->dst < x->out->loads[j].dst + count)
                 return stop(x->cpu, x->pc, x->w, "parallel delayed-result write conflict");
         }
-        x->out->loads[x->out->load_count++] = (CdjC674xLoad){
+        *append_load(x->cpu, x->out) = (CdjC674xLoad){
             .due = due, .value = x->cpu->r[x->cross][x->b],
             .bank = x->side, .dst = x->dst, .size = 0
         };
@@ -1483,7 +1556,7 @@ static bool arm_intsp(CdjC674xArm *x)
                 return stop(x->cpu, x->pc, x->insn->word,
                             "parallel delayed-result write conflict");
         }
-        x->out->loads[x->out->load_count++] = (CdjC674xLoad){
+        *append_load(x->cpu, x->out) = (CdjC674xLoad){
             .due = due, .value = result,
             .address = inexact ? 1u << (x->side ? 23 : 7) : 0,
             .bank = x->side, .dst = x->dst, .size = 0
@@ -1512,7 +1585,7 @@ static bool arm_spint(CdjC674xArm *x)
                 return stop(x->cpu, x->pc, x->insn->word,
                             "parallel delayed-result write conflict");
         }
-        x->out->loads[x->out->load_count++] = (CdjC674xLoad){
+        *append_load(x->cpu, x->out) = (CdjC674xLoad){
             .due = due, .value = result.value,
             .address = result.status << shift,
             .bank = x->side, .dst = x->dst, .size = 0
@@ -1599,7 +1672,7 @@ static bool arm_addsubsp(CdjC674xArm *x)
                 return stop(x->cpu, x->pc, x->insn->word,
                             "parallel delayed-result write conflict");
         }
-        x->out->loads[x->out->load_count++] = (CdjC674xLoad){
+        *append_load(x->cpu, x->out) = (CdjC674xLoad){
             .due = due, .value = result.value,
             .address = result.status << shift,
             .bank = x->side, .dst = x->dst, .size = 0
@@ -1628,7 +1701,7 @@ static bool arm_mpysp(CdjC674xArm *x)
                 return stop(x->cpu, x->pc, x->insn->word,
                             "parallel delayed-result write conflict");
         }
-        x->out->loads[x->out->load_count++] = (CdjC674xLoad){
+        *append_load(x->cpu, x->out) = (CdjC674xLoad){
             .due = due, .value = result.value,
             .address = result.status << shift,
             .bank = x->side, .dst = x->dst, .size = 0,
@@ -2003,7 +2076,7 @@ static bool arm_cmpy(CdjC674xArm *x)
                 return stop(x->cpu, x->pc, x->insn->word,
                             "parallel delayed-result write conflict");
         }
-        x->out->loads[x->out->load_count++] = (CdjC674xLoad){
+        *append_load(x->cpu, x->out) = (CdjC674xLoad){
             .due = due,
             .value = r.pair_dst ? r.value : (uint32_t)r.value,
             .bank = x->side, .dst = x->dst, .size = r.pair_dst ? 16u : 0u
@@ -2082,7 +2155,7 @@ static bool arm_dotp(CdjC674xArm *x)
                 return stop(x->cpu, x->pc, x->insn->word,
                             "parallel delayed-result write conflict");
         }
-        x->out->loads[x->out->load_count++] = (CdjC674xLoad){
+        *append_load(x->cpu, x->out) = (CdjC674xLoad){
             .due = due,
             .value = pair ? r.value : (uint32_t)r.value,
             .bank = x->side, .dst = x->dst, .size = pair ? 16 : 0
@@ -2181,12 +2254,12 @@ static bool arm_packed16_m(CdjC674xArm *x)
                 return stop(x->cpu, x->pc, x->insn->word,
                             "parallel delayed-result write conflict");
         }
-        x->out->loads[x->out->load_count++] = (CdjC674xLoad){
+        *append_load(x->cpu, x->out) = (CdjC674xLoad){
             .due = due, .value = value, .bank = x->side, .dst = x->dst,
             .size = 0
         };
         if (saturated)
-            x->out->loads[x->out->load_count++] = (CdjC674xLoad){
+            *append_load(x->cpu, x->out) = (CdjC674xLoad){
                 .due = due + 1, .address = 1u << (4 + x->side),
                 .size = CDJ_C674X_DELAYED_SAT
             };
@@ -2260,7 +2333,7 @@ static bool arm_packed8(CdjC674xArm *x)
                 return stop(x->cpu, x->pc, x->insn->word,
                             "parallel delayed-result write conflict");
         }
-        x->out->loads[x->out->load_count++] = (CdjC674xLoad){
+        *append_load(x->cpu, x->out) = (CdjC674xLoad){
             .due = due, .value = pair ? result : (uint32_t)result,
             .bank = x->side, .dst = x->dst, .size = pair ? 16 : 0
         };
@@ -2287,7 +2360,7 @@ static bool packbits_queue_e2(CdjC674xArm *x, uint32_t result)
             return stop(x->cpu, x->pc, x->insn->word,
                         "parallel delayed-result write conflict");
     }
-    x->out->loads[x->out->load_count++] = (CdjC674xLoad){
+    *append_load(x->cpu, x->out) = (CdjC674xLoad){
         .due = due, .value = result, .address = 0,
         .bank = x->side, .dst = x->dst, .size = 0
     };
@@ -2500,7 +2573,7 @@ static bool dp_queue(CdjC674xArm *x, uint64_t due, unsigned dst,
             return stop(x->cpu, x->pc, x->insn->word,
                         "parallel delayed-result write conflict");
     }
-    x->out->loads[x->out->load_count++] = (CdjC674xLoad){
+    *append_load(x->cpu, x->out) = (CdjC674xLoad){
         .due = due, .value = value, .address = status,
         .bank = x->side, .dst = dst, .size = 0, .sign_extend = multiplier
     };
@@ -2594,7 +2667,7 @@ static bool arm_cmpdp(CdjC674xArm *x)
         if (!dp_queue(x, due, x->dst, (uint32_t)result.value, 0, false))
             return false;
         if (result.status)
-            x->out->loads[x->out->load_count++] = (CdjC674xLoad){
+            *append_load(x->cpu, x->out) = (CdjC674xLoad){
                 .due = due,
                 .address = result.status << (x->side ? 16 : 0),
                 .size = CDJ_C674X_DELAYED_FAUCR
@@ -2804,7 +2877,7 @@ static bool queue_delayed_result(CdjC674xArm *x, uint64_t due, uint64_t value,
             return stop(x->cpu, x->pc, x->insn->word,
                         "parallel delayed-result write conflict");
     }
-    x->out->loads[x->out->load_count++] = (CdjC674xLoad){
+    *append_load(x->cpu, x->out) = (CdjC674xLoad){
         .due = due, .value = value, .bank = x->side, .dst = dst,
         .size = count == 2 ? 16u : 0u
     };
@@ -2946,7 +3019,7 @@ static bool arm_sat40(CdjC674xArm *x)
             if (x->out->load_count == 40)
                 return stop(x->cpu, x->pc, x->insn->word,
                             "delayed-status queue full");
-            x->out->loads[x->out->load_count++] = (CdjC674xLoad){
+            *append_load(x->cpu, x->out) = (CdjC674xLoad){
                 .due = x->cpu->cycles + 2, .address = 1u << x->side,
                 .size = CDJ_C674X_DELAYED_SAT
             };
@@ -2970,7 +3043,7 @@ static bool arm_rpack2(CdjC674xArm *x)
         if (x->out->load_count == 40)
             return stop(x->cpu, x->pc, x->insn->word,
                         "delayed-status queue full");
-        x->out->loads[x->out->load_count++] = (CdjC674xLoad){
+        *append_load(x->cpu, x->out) = (CdjC674xLoad){
             .due = x->cpu->cycles + 2, .address = 1u << (2 + x->side),
             .size = CDJ_C674X_DELAYED_SAT
         };
@@ -2996,7 +3069,7 @@ static bool queue_saturation(CdjC674xArm *x)
 {
     if (x->out->load_count == 40)
         return stop(x->cpu, x->pc, x->insn->word, "delayed-status queue full");
-    x->out->loads[x->out->load_count++] = (CdjC674xLoad){
+    *append_load(x->cpu, x->out) = (CdjC674xLoad){
         .due = x->cpu->cycles + 2, .address = 1u << x->side,
         .size = CDJ_C674X_DELAYED_SAT
     };
@@ -3533,7 +3606,7 @@ bool cdj_c674x_arm_table_row(unsigned index, uint32_t *mask, uint32_t *match,
     return true;
 }
 
-static const CdjC674xArmEntry *cdj_c674x_arm_lookup(const CdjC674xArm *x)
+static const CdjC674xArmEntry *cdj_c674x_arm_scan(const CdjC674xArm *x)
 {
     for (unsigned i = 0; i < sizeof(cdj_c674x_arms) /
                              sizeof(cdj_c674x_arms[0]); ++i) {
@@ -3559,8 +3632,46 @@ static const CdjC674xArmEntry *cdj_c674x_arm_lookup(const CdjC674xArm *x)
     return NULL;
 }
 
-bool cdj_c674x_execute(CdjC674x *cpu, const CdjC674xPacket *packet,
-                       CdjC674xRead read, CdjC674xWrite write, void *opaque)
+/* Selection is a pure function of the instruction word (every `also`
+ * predicate reads only w and a = w[17:13]; see
+ * cdj_c674x_arm_table_predicates_are_word_only), so memoizing it per word is
+ * exact.  The first-match scan over 114 rows was ~15% of DSP host time.
+ * Each entry packs word and row into one relaxed 64-bit atomic, so threads
+ * sharing the table can only see whole entries (plain thread-locals cost a
+ * call per access on macOS).  ponytail: direct-mapped; a miss just rescans. */
+#define CDJ_C674X_ARM_MEMO_BITS 12
+static _Atomic uint64_t cdj_c674x_arm_memo[1u << CDJ_C674X_ARM_MEMO_BITS];
+
+static const CdjC674xArmEntry *cdj_c674x_arm_lookup(const CdjC674xArm *x)
+{
+    enum { ROWS = sizeof(cdj_c674x_arms) / sizeof(cdj_c674x_arms[0]) };
+    uint32_t w = x->w;
+    unsigned slot = (w ^ (w >> 13) ^ (w >> 23)) &
+                    ((1u << CDJ_C674X_ARM_MEMO_BITS) - 1);
+    /* High half: row + 1 (0 = empty, ROWS + 1 = no row); low half: word. */
+    uint64_t entry = atomic_load_explicit(&cdj_c674x_arm_memo[slot],
+                                          memory_order_relaxed);
+    unsigned index = entry >> 32;
+    if (index && (uint32_t)entry == w)
+        return index > ROWS ? NULL : &cdj_c674x_arms[index - 1];
+    const CdjC674xArmEntry *row = cdj_c674x_arm_scan(x);
+    index = row ? (unsigned)(row - cdj_c674x_arms) + 1 : ROWS + 1;
+    atomic_store_explicit(&cdj_c674x_arm_memo[slot],
+                          (uint64_t)index << 32 | w, memory_order_relaxed);
+    return row;
+}
+
+/* One execute packet.  `cpu` holds the pre-packet state: every operand read
+ * and stop() go there.  `out` receives the results; it is either a scratch
+ * copy (copy mode) or the committed CPU itself (in-place mode), see
+ * cdj_c674x_execute.  `out` keeps its pre-packet cycles and packets until
+ * the packet retires, because bus and tick callbacks read them from the
+ * board's CPU mid-packet.  Queue appends go through append_load/append_store
+ * so in-place mode can roll a failed packet back.  No helper called with out
+ * may inspect loop or loop_instructions. */
+static bool execute_packet(CdjC674x *cpu, CdjC674x *out, unsigned peak[2],
+                           const CdjC674xPacket *packet, CdjC674xRead read,
+                           CdjC674xWrite write, void *opaque)
 {
     unsigned memory_count = 0;
     /* Multicycle-NOP duration and conflict state for this execute packet.
@@ -3568,25 +3679,21 @@ bool cdj_c674x_execute(CdjC674x *cpu, const CdjC674xPacket *packet,
      * the old local "elapsed". */
     CdjC674xPacketTiming timing = CDJ_C674X_PACKET_TIMING_INIT;
     bool nonaligned_memory = false, bdec_issued = false;
-    /* Packet execution changes only the scalar/pipeline prefix. The loop
-     * schedule and retained instructions are owned by loop_step/setup and
-     * remain untouched here, including on branches that idle the loop.
-     * Keep a transactional copy, but do not copy that large immutable tail.
-     * No helper called with &out may inspect loop or loop_instructions. */
-    CdjC674x out CDJ_C674X_UNINITIALIZED;
-    memcpy(&out, cpu, offsetof(CdjC674x, loop));
     bool written[2][32] = {{false}}, controls[32] = {false};
-    if (cpu->fault) return false;
     if (packet->count > 8) return stop(cpu, cpu->pc, 0, "execute packet exceeds eight instructions");
     /* SPRUFE8B 3.8.11.5 and 3.8.11.9 forbid NOP n (n > 1) in
      * parallel with SPMASK. Check the whole packet before executing any
      * member so the rejection is atomic in either instruction order. */
     bool seen_spmask = false, seen_multicycle_nop = false;
+    /* Kept for the issue loop below, which needs the same two decodes. */
+    unsigned nops[8];
+    bool spmasks[8];
     for (unsigned i = 0; i < packet->count; ++i) {
         const CdjC674xInstruction *insn = &packet->instructions[i];
         unsigned mask;
-        unsigned nop = nop_cycles(insn);
-        bool spmask = spmask_decode(insn, &mask) || spmaskr_decode(insn);
+        unsigned nop = nops[i] = nop_cycles(insn);
+        bool spmask = spmasks[i] =
+            spmask_decode(insn, &mask) || spmaskr_decode(insn);
         if ((spmask && seen_multicycle_nop) ||
             (nop > 1 && nop <= 9 && seen_spmask))
             return stop(cpu, insn->pc, insn->word,
@@ -3598,12 +3705,11 @@ bool cdj_c674x_execute(CdjC674x *cpu, const CdjC674xPacket *packet,
         const CdjC674xInstruction *insn = &packet->instructions[i];
         uint32_t w = insn->word, pc = insn->pc, value = 0;
         bool compact = insn->compact;
-        unsigned ignored_mask;
-        if (spmask_decode(insn, &ignored_mask) || spmaskr_decode(insn)) {
+        if (spmasks[i]) {
             if (i) return stop(cpu, pc, w, "SPMASK(R) must start packet");
             continue; /* Idle loop buffer: SPMASK(R) is a NOP. */
         }
-        unsigned nop = nop_cycles(insn);
+        unsigned nop = nops[i];
         if (nop) {
             /* SPRUFE8B printed page 274 gives IDLE bits 16-13 = 1111 with
              * every other bit zero except p, which nop_cycles reports as
@@ -3739,7 +3845,7 @@ bool cdj_c674x_execute(CdjC674x *cpu, const CdjC674xPacket *packet,
              * Compact BNOP is the branch family that uses halfword scaling. */
             int32_t offset = compact ? sx(w >> 6, 10) * 4
                                           : sx((w >> 7) & 0x1fffff, 21) * 4;
-            if (out.branch_due || !cdj_c674x_packet_multicycle(&timing, 6))
+            if (out->branch_due || !cdj_c674x_packet_multicycle(&timing, 6))
                 return stop(cpu, pc, insn->word, "CALLP with pending branch or multicycle instruction");
             for (unsigned j = 0; j < packet->count; ++j) {
                 if (j == i) continue;
@@ -3751,8 +3857,8 @@ bool cdj_c674x_execute(CdjC674x *cpu, const CdjC674xPacket *packet,
                     return stop(cpu, pc, insn->word, "CALLP with parallel control instruction");
             }
             if (written[side][3]) return stop(cpu, pc, insn->word, "parallel register write conflict");
-            out.r[side][3] = packet->next_pc; written[side][3] = true;
-            if (!queue_branch(&out, cpu->cycles + 6, (pc & ~31u) + (uint32_t)offset))
+            out->r[side][3] = packet->next_pc; written[side][3] = true;
+            if (!queue_branch(out, cpu->cycles + 6, (pc & ~31u) + (uint32_t)offset))
                 return stop(cpu, pc, insn->word, "CALLP branch queue conflict");
             continue;
         }
@@ -3936,7 +4042,7 @@ bool cdj_c674x_execute(CdjC674x *cpu, const CdjC674xPacket *packet,
             } else simple = false;
             if (simple) {
                 if (written[side][dst]) return stop(cpu, pc, insn->word, "parallel register write conflict");
-                out.r[side][dst] = value; written[side][dst] = true;
+                out->r[side][dst] = value; written[side][dst] = true;
                 continue;
             }
             /* SPRUFE8B Figure F-32, Sx1b (printed page 756): register BNOP,
@@ -3957,7 +4063,7 @@ bool cdj_c674x_execute(CdjC674x *cpu, const CdjC674xPacket *packet,
                 unsigned n = w >> 13;
                 if (!cdj_c674x_packet_multicycle(&timing, n + 1))
                     return stop(cpu, pc, insn->word, "multiple multicycle instructions");
-                if (!queue_branch(&out, cpu->cycles + 6, cpu->r[1][(w >> 7) & 15]))
+                if (!queue_branch(out, cpu->cycles + 6, cpu->r[1][(w >> 7) & 15]))
                     return stop(cpu, pc, insn->word, "parallel taken branches or branch queue overflow");
                 continue;
             }
@@ -3966,8 +4072,8 @@ bool cdj_c674x_execute(CdjC674x *cpu, const CdjC674xPacket *packet,
             if ((w & 0xfc7f) == 0xd86f) {
                 unsigned src = ((w >> 7) & 7) + ((insn->header & 0x80000) ? 16 : 0);
                 if (controls[13]) return stop(cpu, pc, insn->word, "parallel control write conflict");
-                out.control[13] = cpu->r[1][src];
-                out.control_ready[13] = cpu->cycles + 4;
+                out->control[13] = cpu->r[1][src];
+                out->control_ready[13] = cpu->cycles + 4;
                 controls[13] = true;
                 continue;
             }
@@ -3984,7 +4090,7 @@ bool cdj_c674x_execute(CdjC674x *cpu, const CdjC674xPacket *packet,
                 if (!cdj_c674x_packet_multicycle(&timing, n + 1))
                     return stop(cpu, pc, insn->word, "multiple multicycle instructions");
                 if (enabled) {
-                    if (!queue_branch(&out, cpu->cycles + 6, (pc & ~31u) + (uint32_t)(displacement * 2)))
+                    if (!queue_branch(out, cpu->cycles + 6, (pc & ~31u) + (uint32_t)(displacement * 2)))
                     return stop(cpu, pc, insn->word, "parallel taken branches or branch queue overflow");
                 }
                 continue;
@@ -4006,21 +4112,21 @@ bool cdj_c674x_execute(CdjC674x *cpu, const CdjC674xPacket *packet,
                                               cpu->r[bank][reg], 4, false))))
                     return stop(cpu, pc, insn->word, "unmapped B15 stack transfer");
                 if (load) {
-                    if (out.load_count == 40)
+                    if (out->load_count == 40)
                         return stop(cpu, pc, insn->word, "load queue full");
-                    for (unsigned j = 0; j < out.load_count; ++j)
-                        if (out.loads[j].due == cpu->cycles + 5 &&
-                            out.loads[j].bank == bank && out.loads[j].dst == reg)
+                    for (unsigned j = 0; j < out->load_count; ++j)
+                        if (out->loads[j].due == cpu->cycles + 5 &&
+                            out->loads[j].bank == bank && out->loads[j].dst == reg)
                             return stop(cpu, pc, insn->word,
                                         "parallel load write conflict");
-                    out.loads[out.load_count++] = (CdjC674xLoad){
+                    *append_load(cpu, out) = (CdjC674xLoad){
                         .due = cpu->cycles + 5, .address = address,
                         .bank = bank, .dst = reg, .size = 4
                     };
                 } else {
-                    if (out.store_count == 24)
+                    if (out->store_count == 24)
                         return stop(cpu, pc, insn->word, "store queue full");
-                    out.stores[out.store_count++] = (CdjC674xStore){
+                    *append_store(cpu, out) = (CdjC674xStore){
                         .due = cpu->cycles + 3, .value = cpu->r[bank][reg],
                         .address = address, .size = 4
                     };
@@ -4048,27 +4154,27 @@ bool cdj_c674x_execute(CdjC674x *cpu, const CdjC674xPacket *packet,
                     return stop(cpu, pc, insn->word, "unmapped stack access");
                 if (written[1][15]) return stop(cpu, pc, insn->word, "parallel register write conflict");
                 if (load) {
-                    if (out.load_count == 40)
+                    if (out->load_count == 40)
                         return stop(cpu, pc, insn->word, "load queue full");
-                    for (unsigned j = 0; j < out.load_count; ++j)
-                        if (out.loads[j].due == cpu->cycles + 5 &&
-                            out.loads[j].bank == bank &&
-                            out.loads[j].dst < reg + (size == 8 ? 2 : 1) &&
-                            reg < out.loads[j].dst + queued_result_registers(&out.loads[j]))
+                    for (unsigned j = 0; j < out->load_count; ++j)
+                        if (out->loads[j].due == cpu->cycles + 5 &&
+                            out->loads[j].bank == bank &&
+                            out->loads[j].dst < reg + (size == 8 ? 2 : 1) &&
+                            reg < out->loads[j].dst + queued_result_registers(&out->loads[j]))
                             return stop(cpu, pc, insn->word, "parallel load write conflict");
-                    out.loads[out.load_count++] = (CdjC674xLoad){
+                    *append_load(cpu, out) = (CdjC674xLoad){
                         .due = cpu->cycles + 5, .address = address, .bank = bank,
                         .dst = reg, .size = size
                     };
                 } else {
-                    if (out.store_count == 24)
+                    if (out->store_count == 24)
                         return stop(cpu, pc, insn->word, "store queue full");
-                    out.stores[out.store_count++] = (CdjC674xStore){
+                    *append_store(cpu, out) = (CdjC674xStore){
                         .due = cpu->cycles + 3, .value = data,
                         .address = address, .size = size
                     };
                 }
-                out.r[1][15] = load ? address : old_sp - delta;
+                out->r[1][15] = load ? address : old_sp - delta;
                 written[1][15] = true;
                 continue;
             }
@@ -4084,7 +4190,7 @@ bool cdj_c674x_execute(CdjC674x *cpu, const CdjC674xPacket *packet,
                 if (w & 0x40) { dst += ms; b += rs; }
                 else { dst += rs; b += ms; }
                 if (written[side][dst]) return stop(cpu, pc, insn->word, "parallel register write conflict");
-                out.r[side][dst] = cpu->r[cross][b]; written[side][dst] = true;
+                out->r[side][dst] = cpu->r[cross][b]; written[side][dst] = true;
                 continue;
             }
             /* SPRUFE8B Figure D-4: compact .L ADD/SUB. */
@@ -4099,7 +4205,7 @@ bool cdj_c674x_execute(CdjC674x *cpu, const CdjC674xPacket *packet,
             value = (w & 0x0800) ? cpu->r[side][a] - cpu->r[cross][b]
                                   : cpu->r[side][a] + cpu->r[cross][b];
             if (written[side][dst]) return stop(cpu, pc, insn->word, "parallel register write conflict");
-            out.r[side][dst] = value; written[side][dst] = true;
+            out->r[side][dst] = value; written[side][dst] = true;
             continue;
         }
         CdjC674xInterruptGate interrupt_gate = interrupt_gate_decode(insn);
@@ -4116,13 +4222,13 @@ bool cdj_c674x_execute(CdjC674x *cpu, const CdjC674xPacket *packet,
              * TSR.GIE and CSR.GIE are one physical bit, while TSR.SGIE holds
              * the saved state used by RINT. */
             if (interrupt_gate == CDJ_C674X_INTERRUPT_GATE_DISABLE) {
-                out.control[26] = (out.control[26] & ~3u) |
+                out->control[26] = (out->control[26] & ~3u) |
                                   ((cpu->control[1] & 1u) << 1);
-                out.control[1] &= ~1u;
+                out->control[1] &= ~1u;
             } else {
                 uint32_t gie = (cpu->control[26] >> 1) & 1u;
-                out.control[26] = (out.control[26] & ~3u) | gie;
-                out.control[1] = (out.control[1] & ~1u) | gie;
+                out->control[26] = (out->control[26] & ~3u) | gie;
+                out->control[1] = (out->control[1] & ~1u) | gie;
             }
             continue;
         }
@@ -4148,7 +4254,7 @@ bool cdj_c674x_execute(CdjC674x *cpu, const CdjC674xPacket *packet,
                 cdj_c674x_adda_long(uncond, w, cpu->r[1][14], cpu->r[1][15]);
             if (written[adda.side][adda.dst])
                 return stop(cpu, pc, insn->word, "parallel register write conflict");
-            out.r[adda.side][adda.dst] = adda.result;
+            out->r[adda.side][adda.dst] = adda.result;
             written[adda.side][adda.dst] = true;
             continue;
         }
@@ -4158,7 +4264,7 @@ bool cdj_c674x_execute(CdjC674x *cpu, const CdjC674xPacket *packet,
             enabled = (cpu->r[bank[creg]][index[creg]] != 0) ^ z;
         }
         CdjC674xArm arm = {
-            .cpu = cpu, .out = &out, .packet = packet, .insn = insn,
+            .cpu = cpu, .out = out, .packet = packet, .insn = insn,
             .read = read, .write = write, .opaque = opaque,
             .timing = &timing, .written = written, .controls = controls,
             .memory_count = &memory_count,
@@ -4180,7 +4286,7 @@ bool cdj_c674x_execute(CdjC674x *cpu, const CdjC674xPacket *packet,
         reg_write = arm.reg_write; control_write = arm.control_write;
         if (enabled && reg_write) {
             if (written[side][dst]) return stop(cpu, pc, insn->word, "parallel register write conflict");
-            out.r[side][dst] = value; written[side][dst] = true;
+            out->r[side][dst] = value; written[side][dst] = true;
         }
         if (enabled && control_write) {
             if (controls[dst]) return stop(cpu, pc, insn->word, "parallel control write conflict");
@@ -4188,80 +4294,80 @@ bool cdj_c674x_execute(CdjC674x *cpu, const CdjC674xPacket *packet,
                 /* ISR/ICR update IFR after one intervening execute packet.
                  * Reuse the ABI-stable delayed-result queue so old checkpoint
                  * layouts retain the in-flight effect. */
-                if (out.load_count == 40)
+                if (out->load_count == 40)
                     return stop(cpu, pc, insn->word, "load queue full");
-                out.loads[out.load_count++] = (CdjC674xLoad){
+                *append_load(cpu, out) = (CdjC674xLoad){
                     .due = cpu->cycles + 2, .address = value & 0xfff0u,
                     .size = dst == 2 ? CDJ_C674X_DELAYED_IFR_SET
                                      : CDJ_C674X_DELAYED_IFR_CLEAR
                 };
             } else if (dst == 0) {
-                out.control[0] = value & 0x03ffffffu;
-                out.control_ready[0] = cpu->cycles + 2;
+                out->control[0] = value & 0x03ffffffu;
+                out->control_ready[0] = cpu->cycles + 2;
             } else if (dst == 1) {
                 /* PCC/DCC are documented as ignored on C674x. PWRD support is
                  * device-specific; actual C6747 CPU power-down is not yet
                  * modeled, so ignoring that field is an explicit approximation.
                  * SAT is clear-only through MVC; CPU ID, revision and endian
                  * mode are read-only. */
-                out.control[1] = (out.control[1] & 0xffff0100u) |
-                                 (out.control[1] & value & 0x200u) |
+                out->control[1] = (out->control[1] & 0xffff0100u) |
+                                 (out->control[1] & value & 0x200u) |
                                  (value & 3u);
                 /* CSR.GIE and TSR.GIE are the same physical bit. */
-                out.control[26] = (out.control[26] & ~1u) | (value & 1u);
+                out->control[26] = (out->control[26] & ~1u) | (value & 1u);
                 /* CSR.PGIE and ITSR.GIE are also one physical bit. */
-                out.control[27] = (out.control[27] & ~1u) |
+                out->control[27] = (out->control[27] & ~1u) |
                                   ((value >> 1) & 1u);
             } else if (dst == 24) {
                 /* GFPGFR reserves bits 31-27 and 23-8.  Its SIZE and POLY
                  * fields are ordinary MVC R/W bits (Figure 2-6, page 40). */
-                out.control[24] = value & 0x070000ffu;
+                out->control[24] = value & 0x070000ffu;
             } else if (dst == 18 || dst == 19 || dst == 20) {
                 /* FADCR/FAUCR/FMCR bits 31-27 and 15-11: "A value written to
                  * this field has no effect" (SPRUFE8B Tables 2-25/2-26/2-27,
                  * printed pages 59, 61 and 63), so MVC drops them rather than
                  * storing bits a read must then hide.  The warning bits the FP
                  * instructions OR in all live in the unreserved ranges. */
-                out.control[dst] = value & 0x07ff07ffu;
+                out->control[dst] = value & 0x07ff07ffu;
             } else if (dst == 21) {
-                out.control[21] = value & 0x3fu;
+                out->control[21] = value & 0x3fu;
             } else if (dst == 10) {
                 /* SPRUFE8B 2.9.14.1-.3, printed page 56: reset clears the
                  * counter and disables it; writing TSCL enables it, the value
                  * is ignored, counting starts in the following cycle, and
                  * once enabled it cannot be disabled under program control.
                  * Therefore a later write has no counter state to change. */
-                if (out.control_ready[16] == 0)
-                    out.control_ready[16] = cpu->cycles + 1u;
+                if (out->control_ready[16] == 0)
+                    out->control_ready[16] = cpu->cycles + 1u;
             } else if (dst == 4) {
                 /* Reset remains enabled. NMIE can be set by MVC but not
                  * manually cleared; maskable enables are ordinary RW bits. */
-                out.control[4] = (value & 0xfff0u) |
-                                 ((out.control[4] | value) & 2u) | 1u;
+                out->control[4] = (value & 0xfff0u) |
+                                 ((out->control[4] | value) & 2u) | 1u;
             } else if (dst == 5) {
                 /* HPEINT is derived on read; only the aligned IST base writes. */
-                out.control[5] = value & 0xfffffc00u;
+                out->control[5] = value & 0xfffffc00u;
             } else if (dst == 27) {
-                out.control[27] = value & 0x0000c6dfu;
-                out.control[1] = (out.control[1] & ~2u) |
+                out->control[27] = value & 0x0000c6dfu;
+                out->control[1] = (out->control[1] & ~2u) |
                                  ((value & 1u) << 1);
             } else if (dst == 26) {
                 /* Privilege and hardware-owned TSR fields need a later
                  * execution-mode model. Preserve them while allowing the
                  * GIE/SGIE pair used by interrupt-critical firmware. */
-                out.control[26] = (out.control[26] & ~3u) | (value & 3u);
-                out.control[1] = (out.control[1] & ~1u) | (value & 1u);
+                out->control[26] = (out->control[26] & ~3u) | (value & 3u);
+                out->control[1] = (out->control[1] & ~1u) | (value & 1u);
             } else {
-                out.control[dst] = value;
+                out->control[dst] = value;
             }
             controls[dst] = true;
-            if (dst == 13 || dst == 14) out.control_ready[dst] = cpu->cycles + 4;
+            if (dst == 13 || dst == 14) out->control_ready[dst] = cpu->cycles + 4;
         }
     }
-    /* Issue only appends queue entries; retirement below can modify and
-     * remove them.  Commit the pre-retirement extent, including slots that
-     * become inactive, to preserve checkpoint bytes and struct padding. */
-    unsigned store_peak = out.store_count, load_peak = out.load_count;
+    /* Issue only appends and retirement below only removes, so this is the
+     * queues' high-water mark: the extent a rollback must restore. */
+    peak[0] = out->store_count;
+    peak[1] = out->load_count;
     if (nonaligned_memory && memory_count > 1)
         return stop(cpu, cpu->pc, 0, "parallel access with nonaligned memory instruction");
     /* Same-cycle overlapping RAM reads/writes need bus arbitration that
@@ -4277,12 +4383,12 @@ bool cdj_c674x_execute(CdjC674x *cpu, const CdjC674xPacket *packet,
      * C6745/C6747 device manual SPRUH91D describes no L1D arbitration for it
      * either.  Settling this needs hardware or a TI statement, not a reading of
      * the CPU manual, so this halts rather than guess read-before-write. */
-    for (unsigned j = 0; j < out.load_count; ++j) {
-        if (!queued_memory_load(&out.loads[j])) continue;
-        for (unsigned k = 0; k < out.store_count; ++k) {
-            if (out.loads[j].due - 2 != out.stores[k].due) continue;
-            const CdjC674xLoad *load = &out.loads[j];
-            const CdjC674xStore *store = &out.stores[k];
+    for (unsigned j = 0; out->store_count && j < out->load_count; ++j) {
+        if (!queued_memory_load(&out->loads[j])) continue;
+        for (unsigned k = 0; k < out->store_count; ++k) {
+            if (out->loads[j].due - 2 != out->stores[k].due) continue;
+            const CdjC674xLoad *load = &out->loads[j];
+            const CdjC674xStore *store = &out->stores[k];
             for (unsigned l = 0; l < (load->size & 255); ++l)
             for (unsigned s = 0; s < (store->size & 255); ++s)
                 if (circular_address(load->address, load->address + l, load->size >> 8) ==
@@ -4291,22 +4397,22 @@ bool cdj_c674x_execute(CdjC674x *cpu, const CdjC674xPacket *packet,
         }
     }
     /* Reject E5/E1 register collisions before any RAM transaction commits. */
-    for (unsigned j = 0; j < out.load_count; ++j) {
-        unsigned count = queued_result_registers(&out.loads[j]);
-        if (count && out.loads[j].due == cpu->cycles + 1 &&
-            (written[out.loads[j].bank][out.loads[j].dst] ||
-             (count == 2 && written[out.loads[j].bank][out.loads[j].dst + 1])))
+    for (unsigned j = 0; j < out->load_count; ++j) {
+        unsigned count = queued_result_registers(&out->loads[j]);
+        if (count && out->loads[j].due == cpu->cycles + 1 &&
+            (written[out->loads[j].bank][out->loads[j].dst] ||
+             (count == 2 && written[out->loads[j].bank][out->loads[j].dst + 1])))
             return stop(cpu, cpu->pc, 0, "delayed-result write conflict");
-        if (!out.loads[j].size && out.loads[j].address &&
-            out.loads[j].due == cpu->cycles + 1 &&
-            controls[out.loads[j].sign_extend ? 20 : 18])
+        if (!out->loads[j].size && out->loads[j].address &&
+            out->loads[j].due == cpu->cycles + 1 &&
+            controls[out->loads[j].sign_extend ? 20 : 18])
             return stop(cpu, cpu->pc, 0, "delayed FP-status write conflict");
-        if (out.loads[j].size == CDJ_C674X_DELAYED_FAUCR &&
-            out.loads[j].due == cpu->cycles + 1 && controls[19])
+        if (out->loads[j].size == CDJ_C674X_DELAYED_FAUCR &&
+            out->loads[j].due == cpu->cycles + 1 && controls[19])
             return stop(cpu, cpu->pc, 0, "delayed FP-status write conflict");
     }
     if (packet->single_cycle && timing.cycles > 1) {
-        out.idle_cycles = timing.cycles - 1;
+        out->idle_cycles = timing.cycles - 1;
         timing.cycles = 1;
     }
     /* SPRUFE8B printed page 274: IDLE performs "an infinite multicycle NOP
@@ -4315,82 +4421,85 @@ bool cdj_c674x_execute(CdjC674x *cpu, const CdjC674xPacket *packet,
      * still issues its one cycle below; the unbounded wait afterwards is the
      * sentinel, which the branch-completion arm clears and which
      * interrupt_pipe_down replaces with the entry interval. */
-    if (timing.idle) out.idle_cycles = CDJ_C674X_IDLE_FOREVER;
-    out.pc = packet->next_pc;
+    if (timing.idle) out->idle_cycles = CDJ_C674X_IDLE_FOREVER;
+    out->pc = packet->next_pc;
+    uint64_t now = cpu->cycles;
     for (unsigned i = 0; i < timing.cycles; ++i) {
-        ++out.cycles;
-        if (out.cycle_tick) out.cycle_tick(out.cycle_opaque);
-        for (unsigned j = 0; j < out.store_count;) {
-            CdjC674xStore *store = &out.stores[j];
-            if (store->due > out.cycles) { ++j; continue; }
+        ++now;
+        if (out->cycle_tick) out->cycle_tick(out->cycle_opaque);
+        for (unsigned j = 0; j < out->store_count;) {
+            CdjC674xStore *store = &out->stores[j];
+            if (store->due > now) { ++j; continue; }
             if (!write_transfer(write, opaque, store->address, store->value, store->size, true))
                 return stop(cpu, cpu->pc, 0, "RAM store callback broke commit guarantee");
-            memmove(store, store + 1, (--out.store_count - j) * sizeof(*store));
+            memmove(store, store + 1, (--out->store_count - j) * sizeof(*store));
         }
-        for (unsigned j = 0; j < out.load_count;) {
-            CdjC674xLoad *load = &out.loads[j];
-            if (queued_memory_load(load) && load->due == out.cycles + 2) {
+        for (unsigned j = 0; j < out->load_count;) {
+            CdjC674xLoad *load = &out->loads[j];
+            /* Neither its E3 read nor its retirement falls in this cycle. */
+            if (load->due > now + 2) { ++j; continue; }
+            if (queued_memory_load(load) && load->due == now + 2) {
                 uint64_t data;
                 if (!read_transfer(read, opaque, load->address, load->size, &data))
                     return stop(cpu, cpu->pc, 0, "RAM load mapping changed during execution");
                 if (load->sign_extend) data = sx(data, (load->size & 255) * 8);
                 load->value = data;
             }
-            if (load->due > out.cycles) { ++j; continue; }
+            if (load->due > now) { ++j; continue; }
             if (load->size == CDJ_C674X_DELAYED_SAT) {
                 /* Functional-unit set wins a simultaneous MVC write/clear
                  * (SPRUFE8B 2.8.3 and 2.9.13). Parallel units accumulate. */
-                out.control[1] |= 0x200u;
-                out.control[21] |= load->address & 0x3fu;
-                memmove(load, load + 1, (--out.load_count - j) * sizeof(*load));
+                out->control[1] |= 0x200u;
+                out->control[21] |= load->address & 0x3fu;
+                memmove(load, load + 1, (--out->load_count - j) * sizeof(*load));
                 continue;
             }
             if (load->size == CDJ_C674X_DELAYED_FAUCR) {
                 /* DP compare warning bits, due with dst on E2 (SPRUFE8B
                  * 4.2.10, printed page 598).  Sticky, and parallel .S units
                  * accumulate into their own halves. */
-                out.control[19] |= load->address;
-                memmove(load, load + 1, (--out.load_count - j) * sizeof(*load));
+                out->control[19] |= load->address;
+                memmove(load, load + 1, (--out->load_count - j) * sizeof(*load));
                 continue;
             }
             if (load->size == CDJ_C674X_DELAYED_IFR_SET ||
                 load->size == CDJ_C674X_DELAYED_IFR_CLEAR) {
                 uint32_t sets = 0, clears = 0;
-                for (unsigned k = j; k < out.load_count; ++k) {
-                    CdjC674xLoad *effect = &out.loads[k];
-                    if (effect->due > out.cycles) continue;
+                for (unsigned k = j; k < out->load_count; ++k) {
+                    CdjC674xLoad *effect = &out->loads[k];
+                    if (effect->due > now) continue;
                     if (effect->size == CDJ_C674X_DELAYED_IFR_SET)
                         sets |= effect->address;
                     else if (effect->size == CDJ_C674X_DELAYED_IFR_CLEAR)
                         clears |= effect->address;
                 }
                 /* Incoming/set requests win over a simultaneous clear. */
-                out.control[2] = ((out.control[2] & ~clears) | sets) & 0xfff2u;
-                for (unsigned k = 0; k < out.load_count;) {
-                    CdjC674xLoad *effect = &out.loads[k];
-                    if (effect->due <= out.cycles &&
+                out->control[2] = ((out->control[2] & ~clears) | sets) & 0xfff2u;
+                for (unsigned k = 0; k < out->load_count;) {
+                    CdjC674xLoad *effect = &out->loads[k];
+                    if (effect->due <= now &&
                         (effect->size == CDJ_C674X_DELAYED_IFR_SET ||
                          effect->size == CDJ_C674X_DELAYED_IFR_CLEAR)) {
                         memmove(effect, effect + 1,
-                                (--out.load_count - k) * sizeof(*effect));
+                                (--out->load_count - k) * sizeof(*effect));
                     } else ++k;
                 }
                 j = 0;
                 continue;
             }
-            out.r[load->bank][load->dst] = load->value;
+            out->r[load->bank][load->dst] = load->value;
             if (queued_result_registers(load) == 2)
-                out.r[load->bank][load->dst + 1] = load->value >> 32;
+                out->r[load->bank][load->dst + 1] = load->value >> 32;
             if (!load->size)
-                out.control[load->sign_extend ? 20 : 18] |= load->address;
-            memmove(load, load + 1, (--out.load_count - j) * sizeof(*load));
+                out->control[load->sign_extend ? 20 : 18] |= load->address;
+            memmove(load, load + 1, (--out->load_count - j) * sizeof(*load));
         }
-        if (out.branch_due && out.cycles == out.branch_due) {
-            out.pc = out.branch_target;
+        if (out->branch_due && now == out->branch_due) {
+            out->pc = out->branch_target;
             /* SPRUFE8B 7.14: a taken branch idles an active loop buffer.
              * Do not clear the special idle SPLX state restored by B IRP;
              * section 7.7.3.2 requires it until the return SPLOOP starts. */
-            if (out.loop_active) {
+            if (out->loop_active) {
                 /*
                  * One corner the manual does not settle, kept fail-closed.
                  *
@@ -4416,52 +4525,110 @@ bool cdj_c674x_execute(CdjC674x *cpu, const CdjC674xPacket *packet,
                  * finds no step with both loop_active and branch_due, so the
                  * firmware this was fixed for does not reach it.
                  */
-                if (loop_retained_valid(&out))
-                    return stop(cpu, out.pc, 0,
+                if (loop_retained_valid(out))
+                    return stop(cpu, out->pc, 0,
                                 "taken branch out of a nested loop with an "
                                 "interrupted loop pending");
-                loop_set_active(&out, false);
-                loop_clear_interrupt_phase(&out);
+                loop_set_active(out, false);
+                loop_clear_interrupt_phase(out);
             }
-            if (out.branch_count) {
-                out.branch_due = out.branch_queue[0].due;
-                out.branch_target = out.branch_queue[0].target;
-                memmove(out.branch_queue, out.branch_queue + 1,
-                        --out.branch_count * sizeof(out.branch_queue[0]));
-            } else out.branch_due = 0;
-            out.idle_cycles = 0;
+            if (out->branch_count) {
+                out->branch_due = out->branch_queue[0].due;
+                out->branch_target = out->branch_queue[0].target;
+                memmove(out->branch_queue, out->branch_queue + 1,
+                        --out->branch_count * sizeof(out->branch_queue[0]));
+            } else out->branch_due = 0;
+            out->idle_cycles = 0;
             break;
         }
     }
-    ++out.packets;
-    if (store_peak > 24 || load_peak > 40) {
-        /* Keep the original copy boundary for an invalid incoming state. */
-        memcpy(cpu, &out, offsetof(CdjC674x, loop));
-    } else {
-        /* Copy scalar ranges including padding; untouched queue capacity
-         * already has its original bytes in cpu.  The full copy-in above
-         * preserves old operand reads and padding in newly appended slots. */
-        memcpy(cpu, &out, offsetof(CdjC674x, stores));
-        memcpy(cpu->stores, out.stores, store_peak * sizeof(out.stores[0]));
-        memcpy((char *)cpu + offsetof(CdjC674x, store_count),
-               (const char *)&out + offsetof(CdjC674x, store_count),
-               offsetof(CdjC674x, loads) - offsetof(CdjC674x, store_count));
-        memcpy(cpu->loads, out.loads, load_peak * sizeof(out.loads[0]));
-        memcpy((char *)cpu + offsetof(CdjC674x, load_count),
-               (const char *)&out + offsetof(CdjC674x, load_count),
-               offsetof(CdjC674x, loop) - offsetof(CdjC674x, load_count));
-    }
+    out->cycles = now;
+    ++out->packets;
     return true;
+}
+
+/* Packets used to run against a scratch copy of the whole 3 KB prefix that
+ * was copied back on success: two memcpys per packet, ~20% of DSP host time.
+ * In-place mode instead backs up only the scalar prefix and live queue
+ * entries, executes straight into the CPU, and restores it from the backup
+ * if the packet fails, which (with the slots append_* saved) leaves the same
+ * bytes a discarded copy would.  Copy mode stays for an invalid incoming
+ * queue count and as the test reference (CDJ_C674X_COPY_TRANSACTIONS). */
+/* cdj_c674x_execute that also reports, on success, how far into each queue
+ * (stores, loads) the packet wrote: slots at or past these are untouched. */
+static bool execute_transaction(CdjC674x *cpu, const CdjC674xPacket *packet,
+                                CdjC674xRead read, CdjC674xWrite write,
+                                void *opaque, unsigned extent[2])
+{
+    extent[0] = 24;
+    extent[1] = 40;
+    if (cpu->fault) return false;
+#ifndef CDJ_C674X_COPY_TRANSACTIONS
+    if (cpu->store_count <= 24 && cpu->load_count <= 40) {
+        CdjC674x old CDJ_C674X_UNINITIALIZED;
+        copy_prefix(&old, cpu, cpu->store_count, cpu->load_count);
+        /* A failure during issue leaves the counts at their high-water mark;
+         * one during retirement has peak[] from the end of issue. */
+        unsigned peak[2] = {0, 0};
+        if (execute_packet(&old, cpu, peak, packet, read, write, opaque)) {
+            extent[0] = umax(peak[0], old.store_count);
+            extent[1] = umax(peak[1], old.load_count);
+            return true;
+        }
+        copy_prefix(cpu, &old,
+                    peak[0] > cpu->store_count ? peak[0] : cpu->store_count,
+                    peak[1] > cpu->load_count ? peak[1] : cpu->load_count);
+        return false;
+    }
+#endif
+    CdjC674x out CDJ_C674X_UNINITIALIZED;
+    memcpy(&out, cpu, offsetof(CdjC674x, loop));
+    unsigned peak[2];
+    if (!execute_packet(cpu, &out, peak, packet, read, write, opaque))
+        return false;
+    memcpy(cpu, &out, offsetof(CdjC674x, loop));
+    return true;
+}
+
+bool cdj_c674x_execute(CdjC674x *cpu, const CdjC674xPacket *packet,
+                       CdjC674xRead read, CdjC674xWrite write, void *opaque)
+{
+    unsigned extent[2];
+    return execute_transaction(cpu, packet, read, write, opaque, extent);
 }
 
 static bool loop_step(CdjC674x *cpu, CdjC674xRead read, CdjC674xWrite write, void *opaque)
 {
-    CdjC674x out = *cpu;
+    /* Transactional copy of what this step can change.  Only an unsealed
+     * (loading) loop writes the schedule's tags/count arrays and, when it
+     * fetches, the 1,792-byte instruction array; a sealed step leaves both
+     * out of the copy and reads the committed ones.  Dead queue slots are
+     * not copied either: execute reports how far it wrote into each queue,
+     * and only that extent is committed. */
+    bool loading_step = !cpu->loop.sealed;
+    bool buffer_writes = loading_step && !cpu->loop_wait;
+    /* An out-of-range incoming queue count keeps the whole-struct copy. */
+    bool whole = cpu->store_count > 24 || cpu->load_count > 40;
+    CdjC674x out CDJ_C674X_UNINITIALIZED;
+    if (whole) {
+        memcpy(&out, cpu, sizeof(*cpu));
+    } else {
+        copy_prefix(&out, cpu, cpu->store_count, cpu->load_count);
+        size_t loop_start = offsetof(CdjC674x, loop) +
+            (loading_step ? 0 : offsetof(CdjC674xLoop, ii));
+        memcpy((char *)&out + loop_start, (const char *)cpu + loop_start,
+               offsetof(CdjC674x, loop_instructions) - loop_start);
+        if (buffer_writes)
+            memcpy(out.loop_instructions, cpu->loop_instructions,
+                   sizeof(out.loop_instructions));
+    }
+    const CdjC674x *buffer = buffer_writes || whole ? &out : cpu;
+    const CdjC674xLoop *schedule = loading_step || whole ? &out.loop : &cpu->loop;
     /* Also reconciles legacy checkpoints written before SPLX tracking. */
     out.control[26] |= CDJ_C674X_TSR_SPLX;
     CdjC674xPacket combined = {.next_pc = cpu->pc, .single_cycle = true};
     CdjC674xPacket direct = {0};
-    LoopMask masking = {.cpu = &out};
+    LoopMask masking = {.cpu = buffer};
     bool loading = !out.loop.sealed;
     bool reload = loop_immediate_reload(&out);
     bool post = out.loop.sealed && out.loop.cycle >= out.loop.post_cycle &&
@@ -4689,20 +4856,21 @@ static bool loop_step(CdjC674x *cpu, CdjC674xRead read, CdjC674xWrite write, voi
     if (out.loop_pred_history & CDJ_C674X_LOOP_RETURNING)
         masking.mask = 0;
     bool issued = reload && out.loop.sealed ?
-        cdj_c674x_loop_issue_reload(
-            &out.loop, out.control_ready[CDJ_C674X_RELOAD_CURRENT_START],
+        cdj_c674x_loop_issue_reload_from(
+            &out.loop, schedule, out.control_ready[CDJ_C674X_RELOAD_CURRENT_START],
             out.control_ready[CDJ_C674X_RELOAD_OLD_START],
             out.control_ready[CDJ_C674X_RELOAD_OLD_END],
             out.control_ready[CDJ_C674X_RELOAD_POST_END],
             tags, &count, &scheduler_post, &drained, loop_allow, &masking) :
-        cdj_c674x_loop_issue_filtered(&out.loop, tags, &count, &scheduler_post,
-                                     &drained, loop_allow, &masking);
+        cdj_c674x_loop_issue_filtered_from(&out.loop, schedule, tags, &count,
+                                           &scheduler_post, &drained,
+                                           loop_allow, &masking);
     if (!issued)
         return stop(cpu, cpu->pc, 0, "loop issue capacity exceeded");
     if (masking.unknown) return stop(cpu, cpu->pc, 0, "buffered SPMASK unit not implemented");
     if (count + direct.count > 8) return stop(cpu, cpu->pc, 0, "loop/direct packet capacity exceeded");
     for (unsigned i = 0; i < count; ++i)
-        combined.instructions[combined.count++] = out.loop_instructions[tags[i]];
+        combined.instructions[combined.count++] = buffer->loop_instructions[tags[i]];
     for (unsigned i = 0; i < direct.count; ++i)
         combined.instructions[combined.count++] = direct.instructions[i];
     /* SPRUFE8B 7.10: sample the selected condition each cycle. At the end
@@ -4752,7 +4920,8 @@ static bool loop_step(CdjC674x *cpu, CdjC674xRead read, CdjC674xWrite write, voi
     }
     bool branch_matures = reload && cpu->branch_due &&
         cpu->branch_due == cpu->cycles + 1;
-    if (!cdj_c674x_execute(&out, &combined, read, write, opaque))
+    unsigned written[2];
+    if (!execute_transaction(&out, &combined, read, write, opaque, written))
         return stop(cpu, out.fault_pc, out.fault_word, out.fault);
     if (branch_matures && reload) {
         /* Section 7.9.6.3: a taken branch ends program fetch after its last
@@ -4821,7 +4990,19 @@ static bool loop_step(CdjC674x *cpu, CdjC674xRead read, CdjC674xWrite write, voi
     if (drained && (reload ? !reload_taken : scheduler_post) &&
         (!interrupt_draining || (!out.load_count && !out.store_count)))
         loop_set_active(&out, false);
-    *cpu = out;
+    if (whole) {
+        memcpy(cpu, &out, sizeof(*cpu));
+        return true;
+    }
+    copy_prefix(cpu, &out, umax(written[0], cpu->store_count),
+                umax(written[1], cpu->load_count));
+    size_t loop_start = offsetof(CdjC674x, loop) +
+        (loading_step ? 0 : offsetof(CdjC674xLoop, ii));
+    memcpy((char *)cpu + loop_start, (const char *)&out + loop_start,
+           offsetof(CdjC674x, loop_instructions) - loop_start);
+    if (buffer_writes)
+        memcpy(cpu->loop_instructions, out.loop_instructions,
+               sizeof(out.loop_instructions));
     return true;
 }
 
@@ -4833,14 +5014,17 @@ bool cdj_c674x_step_capture_direct(CdjC674x *cpu, CdjC674xRead read,
     if (cpu->fault) return false;
     if (cpu->loop_active) return loop_step(cpu, read, write, opaque);
     if (cpu->idle_cycles) {
-        CdjC674x out = *cpu;
         CdjC674xPacket idle = {.next_pc = cpu->pc, .single_cycle = true};
         /* The IDLE sentinel never counts down; only an interrupt or a branch
-         * ends it (SPRUFE8B printed page 274). */
-        if (out.idle_cycles != CDJ_C674X_IDLE_FOREVER) --out.idle_cycles;
-        if (!cdj_c674x_execute(&out, &idle, read, write, opaque))
-            return stop(cpu, out.fault_pc, out.fault_word, out.fault);
-        *cpu = out;
+         * ends it (SPRUFE8B printed page 274).  Execute is transactional:
+         * on failure it restores the CPU, fault recorded, and only the
+         * count taken here needs putting back. */
+        unsigned idle_cycles = cpu->idle_cycles;
+        if (idle_cycles != CDJ_C674X_IDLE_FOREVER) --cpu->idle_cycles;
+        if (!cdj_c674x_execute(cpu, &idle, read, write, opaque)) {
+            cpu->idle_cycles = idle_cycles;
+            return false;
+        }
         return true;
     }
     CdjC674xPacket packet;
@@ -4907,7 +5091,10 @@ bool cdj_c674x_step_capture_direct(CdjC674x *cpu, CdjC674xRead read,
         if (reload_setup && cpu->branch_due)
             return stop(cpu, cpu->pc, w,
                         "SPKERNELR setup with pending branch unsupported");
-        CdjC674x out = *cpu;
+        /* Setup never writes the loop buffer's instruction array (loading
+         * steps fill it), so the transaction stops short of it. */
+        CdjC674x out CDJ_C674X_UNINITIALIZED;
+        memcpy(&out, cpu, offsetof(CdjC674x, loop_instructions));
         /* SPRUFE8B Figure H-5 scatters compact ii-1 across bits 9:7 and
          * bit 14. GNU binutils format nfu_uspl independently agrees. */
         unsigned ii = first.compact ? (((w >> 7) & 7) | ((w >> 11) & 8)) + 1
@@ -4990,7 +5177,7 @@ bool cdj_c674x_step_capture_direct(CdjC674x *cpu, CdjC674xRead read,
         out.loop_tags = loop_retained_valid(&out) ?
             loop_retained_tags(&out) : 0;
         if (!while_loop && !delayed_loop && out.control[13]) --out.control[13];
-        *cpu = out;
+        memcpy(cpu, &out, offsetof(CdjC674x, loop_instructions));
         return true;
     }
     return cdj_c674x_execute(cpu, &packet, read, write, opaque);

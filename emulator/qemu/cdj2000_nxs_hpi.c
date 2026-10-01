@@ -292,6 +292,16 @@ static bool dsp_read(void *opaque, uint32_t address, uint32_t *value)
     /* RAM and its local L2 alias do not overlap any peripheral window.
      * Instruction fetches dominate reads: avoid probing every MMIO device.
      * Keep SDRAM's dynamic enable gate and all alignment checks. */
+    /* The windows below are disjoint, so their order is free: L2 (and its
+     * local alias) goes first because the firmware executes from it and it
+     * needs no call to decide. */
+    uint32_t local_address = address;
+    if (address >= 0x00800000 && address < 0x00840000) local_address += 0x11000000;
+    if (!(local_address & 3) && local_address >= L2_BASE &&
+        local_address <= L2_BASE + L2_SIZE - 4) {
+        *value = ldl_le_p(s->l2 + local_address - L2_BASE);
+        return true;
+    }
     uint32_t l1d_offset;
     if (!(address & 3) && cdj_c6747_l1d_sram_span(
             &s->cache, address, 4, &l1d_offset)) {
@@ -308,13 +318,6 @@ static bool dsp_read(void *opaque, uint32_t address, uint32_t *value)
         cdj_c6747_emifb_sdram_offset(&s->emifb, address, 4, SDRAM_SIZE,
                                     &sdram_offset)) {
         *value = ldl_le_p(s->sdram + sdram_offset);
-        return true;
-    }
-    uint32_t local_address = address;
-    if (address >= 0x00800000 && address < 0x00840000) local_address += 0x11000000;
-    if (!(local_address & 3) && local_address >= L2_BASE &&
-        local_address <= L2_BASE + L2_SIZE - 4) {
-        *value = ldl_le_p(s->l2 + local_address - L2_BASE);
         return true;
     }
     if (cdj_c6747_syscfg_read(&s->syscfg, address, value)) return true;
@@ -751,6 +754,15 @@ static bool dsp_write(void *opaque, uint32_t address, uint64_t value,
     return true;
 }
 
+/* cdj_c674x_fetch fast path: dsp_memory_span covers exactly dsp_read's RAM
+ * windows, which are disjoint from every peripheral, and a 32-byte-aligned
+ * block lies wholly inside one window or is refused (then fetch uses
+ * dsp_read). */
+static const uint8_t *dsp_fetch_block(void *opaque, uint32_t block)
+{
+    return dsp_memory_span(opaque, block, 32);
+}
+
 static void dsp_cycle_tick(void *opaque)
 {
     NxsHpi *s = opaque;
@@ -1004,6 +1016,7 @@ void cdj_nxs_hpi_init(MemoryRegion *system, void (*hint)(void *, bool), void *op
     }
     nxs_hpi = s;
     cdj_c674x_loop_set_functional_timing(timing && !strcmp(timing, "1"));
+    cdj_c674x_set_fetch_block(dsp_read, dsp_fetch_block);
     s->functional_audio = audio && !strcmp(audio, "1");
     const char *tx_path = getenv("CDJ_NXS_DSP_TX_CAPTURE");
     if (tx_path && *tx_path) {

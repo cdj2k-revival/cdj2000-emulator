@@ -21,7 +21,13 @@ typedef struct {
  * cycles so later firmware hardware dependencies can be inventoried while the
  * unresolved epilog timing is investigated separately. */
 void cdj_c674x_loop_set_functional_timing(bool enabled);
-bool cdj_c674x_loop_functional_timing(void);
+/* Read every DSP cycle by the boards' tick paths, so inline, not a call.
+ * Set only through cdj_c674x_loop_set_functional_timing. */
+extern bool cdj_c674x_loop_functional_timing_enabled;
+static inline bool cdj_c674x_loop_functional_timing(void)
+{
+    return cdj_c674x_loop_functional_timing_enabled;
+}
 bool cdj_c674x_loop_init(CdjC674xLoop *, unsigned ii, uint32_t iterations);
 /* Add the current cycle's instructions; finish marks SPKERNEL. delay is the
  * decoded fstg*ii+fcyc. Control marker instructions are not included as tags. */
@@ -45,6 +51,19 @@ bool cdj_c674x_loop_issue_reload(CdjC674xLoop *, uint64_t current_start,
                                  unsigned *count, bool *post_fetch,
                                  bool *drained,
                                  bool (*allow)(void *, uint32_t), void *opaque);
+/* The same, but reading the tags/count schedule from `schedule`, so a caller
+ * working on a copy of only the scalar fields of a sealed loop can point it
+ * at the original.  Only loop->cycle is written. */
+bool cdj_c674x_loop_issue_filtered_from(CdjC674xLoop *, const CdjC674xLoop *schedule,
+                                        uint32_t tags[8], unsigned *count,
+                                        bool *post_fetch, bool *drained,
+                                        bool (*allow)(void *, uint32_t), void *opaque);
+bool cdj_c674x_loop_issue_reload_from(CdjC674xLoop *, const CdjC674xLoop *schedule,
+                                      uint64_t current_start, uint64_t old_start,
+                                      uint64_t old_end, uint64_t post_end,
+                                      uint32_t tags[8], unsigned *count,
+                                      bool *post_fetch, bool *drained,
+                                      bool (*allow)(void *, uint32_t), void *opaque);
 /* At a legal stage boundary, stop launching iterations and convert the
  * existing SPLOOP/SPLOOPD/SPLOOPW schedule into its interrupt epilog. The
  * caller is responsible for the architectural eligibility checks and for
