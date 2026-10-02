@@ -716,7 +716,8 @@ def encode(verb: str, *args: object) -> str:
 
 
 def encode_press(byte: int, mask: int,
-                 hold_ms: int | None = PLAN_HOLD_MS) -> str:
+                 hold_ms: int | None = PLAN_HOLD_MS,
+                 gap_ms: int | None = None) -> str:
     """One down/up pulse, with the measured hold on it by default.
 
     **The default used to be None**, i.e. "let the board decide", and the board
@@ -729,6 +730,8 @@ def encode_press(byte: int, mask: int,
     """
     if hold_ms is None:
         return encode("press", byte, "%02x" % mask)
+    if gap_ms is not None:
+        return encode("press", byte, "%02x" % mask, hold_ms, gap_ms)
     return encode("press", byte, "%02x" % mask, hold_ms)
 
 
@@ -843,9 +846,39 @@ class PanelControl:
     def state(self) -> str:
         return self.send(encode("state"))
 
-    def press(self, button: str, hold_ms: int | None = PLAN_HOLD_MS) -> str:
+    def press(self, button: str, hold_ms: int | None = PLAN_HOLD_MS,
+              gap_ms: int | None = None) -> str:
         byte, mask = button_mask(button)
-        return self.send(encode_press(byte, mask, hold_ms))
+        return self.send(encode_press(byte, mask, hold_ms, gap_ms))
+
+    def sequence(self, items, timeout: float = 120.0, poll: float = 0.05) -> list[int]:
+        """Queue several presses back to back and wait until the last one is done.
+
+        `items` are (button, hold_ms, gap_ms): the next press goes down about
+        hold_ms + gap_ms after this one, measured in GUEST time by the board's
+        queue (each half is at least two panel frames, ~3 ms).  All of them are
+        sent before the first can finish, over this one connection, so the
+        spacing is the board's and not the host's (a python start-up is longer
+        than a 70 ms guest interval).  Needs a board with the per-press gap
+        (press <byte> <mask> <hold> <gap>); an older one answers "err".
+        Returns the press ids.
+        """
+        ids = []
+        for button, hold_ms, gap_ms in items:
+            reply = self.press(button, hold_ms, gap_ms)
+            press_id = press_id_of(reply)
+            if press_id is None:
+                raise ValueError(f"press {button}: {reply!r} (a board without the gap argument?)")
+            ids.append(press_id)
+        deadline = time.monotonic() + timeout
+        while ids:
+            answer = self.ack(ids[-1])
+            if " done " in f"{answer} " or not answer.startswith("ok"):
+                break
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"press {ids[-1]} not done: {answer}")
+            time.sleep(poll)
+        return ids
 
     def hold(self, button: str, down: bool = True) -> str:
         byte, mask = button_mask(button)
@@ -1647,7 +1680,12 @@ def main(argv: list[str] | None = None) -> int:
                             "0 of 24 measured presses reached a status record"
                             % (PLAN_HOLD_MS, PLAN_HOLD_SOURCE.replace("%", "%%"),
                                CHANNEL_HOLD_DEFAULT_MS))
+    press.add_argument("--gap-ms", type=int, default=None,
+                       help="quiet time after the press in guest ms (default: the board's gap, 300 ms)")
     press.add_argument("--repeat", type=int, default=1)
+    seq = sub.add_parser("sequence", help="presses with exact guest-time spacing: BUTTON:HOLD_MS:GAP_MS ...")
+    seq.add_argument("items", nargs="+", help="BUTTON:HOLD_MS:GAP_MS, e.g. 17.0:30:40 17.1:30:0; the next "
+                     "press goes down HOLD+GAP ms of guest time after this one (floor ~10 ms)")
     press.add_argument("--gap", type=float, default=0.0,
                        help="host-side seconds between repeats")
     press.add_argument("--ack", action="store_true",
@@ -1864,7 +1902,17 @@ def main(argv: list[str] | None = None) -> int:
                     if args.ack:
                         print(panel.press_acked(args.button, args.hold_ms))
                     else:
-                        print(panel.press(args.button, args.hold_ms))
+                        print(panel.press(args.button, args.hold_ms, args.gap_ms))
+            elif args.command == "sequence":
+                parsed = []
+                for item in args.items:
+                    parts = item.split(":")
+                    # a bare BYTE:BIT name uses ':' too, so the numbers are the last two fields
+                    button = ":".join(parts[:-2]) if len(parts) > 2 else parts[0]
+                    hold_gap = parts[-2:] if len(parts) > 2 else []
+                    hold, gap = (int(hold_gap[0]), int(hold_gap[1])) if len(hold_gap) == 2 else (100, 300)
+                    parsed.append((button, hold, gap))
+                print(" ".join(str(i) for i in panel.sequence(parsed)))
             elif args.command == "ack":
                 print(panel.ack(args.id))
             elif args.command in ("sd", "usb"):

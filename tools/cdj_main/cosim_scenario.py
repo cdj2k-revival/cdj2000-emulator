@@ -36,7 +36,10 @@ medium out and put it back; jog+N / jog-N turns the jog ring N steps
 top of the jog dial (a brake in VINYL mode), scratch+S / scratch-S touches
 it and turns the ring for S wall seconds; needle=N touches the NEEDLE
 SEARCH pad at N (0..511) and needle-off lifts the finger; direction-rev /
-direction-fwd sets the DIRECTION lever.
+direction-fwd sets the DIRECTION lever; dnB.b / upB.b hold and release a bit (dn18.0 = REC held for a chord).  A plain button press with a pause under a second
+(`17.0@30:0.07,17.1@30:3`) goes out with the board's own guest-time spacing: the next press goes
+down SECONDS after this one (about 30 ms is the floor in practice, +5 ms of frame quantisation;
+the intervals achieved are printed).
 
 and writes a table of what passed at which guest second, the frame at each
 step (PNG) and the logs, into --out.  A step that times out ends the run: the
@@ -440,11 +443,96 @@ def scenario(run: Run, args) -> None:
     then_keys(run, args.then)
 
 
+SPECIAL_KEY = re.compile(
+    r"rot.*|r\d[+-]\d+|a\d=(0x[0-9a-fA-F]+|\d+)|sd-eject|sd-insert|usb-detach|usb-attach|jog[+-]\d+|"
+    r"bend[+-]\d+(\.\d+)?|scratch[+-]\d+(\.\d+)?|touch-on|touch-off|direction-rev|direction-fwd|"
+    r"needle=(0x[0-9a-fA-F]+|\d+)|needle-off|(dn|up)\d+\.\d+")
+
+
+def sub_second(item: tuple[str, str]) -> bool:
+    """A plain button press whose pause is under a second: the pause is then the guest-time
+    interval from this press going down to the next one going down (SECONDS may be 0.07)."""
+    key, secs = item
+    if SPECIAL_KEY.fullmatch(key.partition("@")[0]) or not secs:
+        return False
+    try:
+        return 0 < float(secs) < 1
+    except ValueError:
+        return False
+
+
+def plain_press(item: tuple[str, str]) -> bool:
+    return not SPECIAL_KEY.fullmatch(item[0].partition("@")[0])
+
+
+def press_times(run: Run) -> dict[int, float]:
+    """press id -> guest time it went down, from the input channel's log lines."""
+    try:
+        text = run.err.read_text(errors="replace")
+    except FileNotFoundError:
+        return {}
+    return {int(i): float(t) for i, t in re.findall(
+        r"cdj2000-input: press (\d+): byte \d+ mask \S+ down at ([\d.]+) s", text)}
+
+
 def then_keys(run: Run, spec: str, name: str = "then") -> None:
     """--then: more keys after the scenario, each with guest seconds after it
-    (--before: the same between the library and the first browse press)."""
-    for n, item in enumerate(x for x in spec.split(",") if x):
+    (--before: the same between the library and the first browse press).
+
+    A button press whose pause is under a second (`17.0@30:0.07,17.1@30:3`) is queued with the
+    board's own guest-time spacing: the next press goes down SECONDS after this one (floor
+    ~10 ms, the hold defaults to half of it up to 100 ms, `KEY@MS` sets it).  The census the
+    other pauses wait on ticks once a second, so these never look at it; the intervals
+    that were really achieved are printed from the input channel's log."""
+    items = []
+    for item in (x for x in spec.split(",") if x):
         key, _, secs = item.rpartition(":")
+        items.append((key, secs))
+    n = 0
+    while n < len(items):
+        key, secs = items[n]
+        if sub_second(items[n]):
+            group = [items[n]]
+            while sub_second(group[-1]) and n + len(group) < len(items) and plain_press(items[n + len(group)]):
+                group.append(items[n + len(group)])
+            batch = []
+            for gkey, gsecs in group:
+                button, _, hold = gkey.partition("@")
+                interval = max(10, round(float(gsecs) * 1000)) if sub_second((gkey, gsecs)) else 0
+                hold_ms = int(hold) if hold else max(5, min(100, interval // 2))
+                gap_ms = max(0, interval - hold_ms) if interval else 300
+                batch.append(f"{button}:{hold_ms}:{gap_ms}")
+            at = run.guest()
+            reply = subprocess.run([PY, "-m", "tools.cdj_main.panel_control", "--port", str(run.port + 4),
+                                    "sequence", *batch], cwd=ROOT, capture_output=True, text=True,
+                                   timeout=300)
+            ids = [int(x) for x in reply.stdout.split() if x.isdigit()]
+            down = press_times(run)
+            marks = [down.get(i) for i in ids]
+            spans = [f"{(b - a) * 1000:.0f}" for a, b in zip(marks, marks[1:]) if a is not None and b is not None]
+            for index, (gkey, gsecs) in enumerate(group):
+                print(f"{name} {n + index + 1}: {gkey.partition('@')[0]}, pause {gsecs} s in guest time", flush=True)
+            if spans:
+                print(f"  intervals between the presses going down (ms): {', '.join(spans)}", flush=True)
+            if not ids:
+                print(f"  (the sequence did not run: {reply.stdout.strip()} {reply.stderr.strip()[-200:]})", flush=True)
+            n += len(group)
+            last_key, last_secs = group[-1]
+            if sub_second(group[-1]):
+                # the group ended on a sub-second item (end of list or a key that is not a plain press):
+                # the board has already finished it (the sequence waits for the last ack); take one census tick
+                at = run.guest()
+                run.wait(name, lambda: run.guest() >= at + 1, 61)
+                continue
+            # the group's last press carries a normal pause: wait it out like any other step
+            at = run.guest()
+            run.wait(name, lambda: run.guest() >= at + float(last_secs or 3), float(last_secs or 3) + 60)
+            try:
+                save_panel(run.frame, run.out / f"{name}-{n}-{last_key.partition('@')[0]}.png")
+            except Exception as error:
+                print(f"  (no frame for {name} {n}: {error})")
+            continue
+        n += 1
         if key.startswith("rot"):
             run.panel("rotary", "7", key[3:])
         elif re.fullmatch(r"r\d[+-]\d+", key):
@@ -465,6 +553,8 @@ def then_keys(run: Run, spec: str, name: str = "then") -> None:
             run.panel("touch", key[6:])
         elif key in ("direction-rev", "direction-fwd"):
             run.panel("direction", key[10:])
+        elif re.fullmatch(r"(dn|up)\d+\.\d+", key):
+            run.panel("down" if key.startswith("dn") else "up", key[2:])     # a chord: hold REC, press a pad, release
         elif re.fullmatch(r"needle=(0x[0-9a-fA-F]+|\d+)", key) or key == "needle-off":
             run.panel("needle", key[7:] if key.startswith("needle=") else "off")
         else:
@@ -473,10 +563,10 @@ def then_keys(run: Run, spec: str, name: str = "then") -> None:
         at = run.guest()
         run.wait(name, lambda: run.guest() >= at + float(secs or 3), float(secs or 3) + 60)
         try:
-            save_panel(run.frame, run.out / f"{name}-{n + 1}-{key}.png")
+            save_panel(run.frame, run.out / f"{name}-{n}-{key}.png")
         except Exception as error:
-            print(f"  (no frame for {name} {n + 1}: {error})")
-        print(f"{name} {n + 1}: {key}, guest {at:.1f} -> {run.guest():.1f}", flush=True)
+            print(f"  (no frame for {name} {n}: {error})")
+        print(f"{name} {n}: {key}, guest {at:.1f} -> {run.guest():.1f}", flush=True)
 
 
 def main(argv=None) -> int:
