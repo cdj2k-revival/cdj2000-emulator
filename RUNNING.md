@@ -1270,6 +1270,24 @@ python -m tools.cdj_main.cosim_scenario --card $H/cardB.img --playlist-row 4 --t
   n x 208) from A's status, and its beat handler 0x042899DC runs for A's beats
   but stores them only when 0x04C0849C != 0, which stock 4.33 leaves at 0.
   Stock 4.33 has no SYNC or MASTER keys.
+- **Working example (02.10.2026):** `scripts/two-decks.sh runs/qz-sync5 7200 7300` does the three commands above in one go
+  (both cards cloned, hub, deck A to `time`, deck B to `loaded`, both kept). **OUT must be short and relative to the repo root**:
+  the hub's unix socket lives under it and an absolute path from a deep home directory is "AF_UNIX path too long". Three runs on
+  the shared build of 29.09 and on `build/qemu-te` (one of them with eight busy loops on the host) all reached PLAY on deck A and
+  ran on; the "waited N s for the other players" hang reported on 02.10 did not reproduce, so it is not fixed, only not seen:
+  if it comes back, note whether `OUT/b/qemu.err` still advances (`cdj2000-cosim: t=`), and the last `netsim: waited` line of
+  both decks. The line is printed once per 5 s of wall clock a deck spends in `cdj2000_netsim.c`'s poll for the hub's promise.
+  Deck B is cued, not playing: press PLAY on it with `panel_control --port <B+4> press 16.0 --hold-ms 100`.
+  `CDJ_WATCH=04c0849c,04c084a4,04fdc510,04fdc514,04fdc518,04fdc530,04fdc544,04fdc608,07db33cc scripts/two-decks.sh ...` logs every
+  write to the SYNC engine's words with the writer's pc (`cdj2000-watch:` lines in `OUT/b/qemu.err`).
+- **A machine frozen at one guest time with 0 % CPU** is, in every case I could reproduce, a gdb client that attached to PORT+3 and left without `c` /
+  `D`. `python -m tools.cdj_main.vm_resume PORT` resumes it; write probes as `with Rsp(PORT + 3) as stub:` (the exit detaches).
+- **TEMPO slider through `panel_control analog`**: field 2 is the position and field 3 its centre; the tempo is recomputed when field 2 changes, so set
+  the centre first (`a3=0x8000`) and then the position (`a2=0x4000` = -5 %, `a2=0xFFFF` = +10 %)..  Measured: position 0x4000 / 0xC000 with centre 0x8000 give -5.1 % / +5.1 %,
+  position 0xFFFF gives +10 %; moving the centre alone after the position was driven changes nothing.
+- SYNC probe of NEW FIRMWARE docs/38 step 0: `runs/exp/sync_probe.py OUT PORT_A PORT_B [A_TEMPO_ANALOG]` (PLAY on B, A's TEMPO,
+  gates `[0x04C0849C]=1` and `[0x04C084A4]` over gdb, before / after dumps, collapsed watch log), then `runs/exp/sync_probe4.py OUT
+  PORT_B SELECTOR [SECONDS] [ADDR=VALUE ...]`.
 - `--replay CAPTURE.pcap` plays a real deck's traffic into the segment instead
   of a second emulated deck (`--replay-renumber 1:2` when the capture's player
   number collides with the emulated one). A recording cannot serve media, so
