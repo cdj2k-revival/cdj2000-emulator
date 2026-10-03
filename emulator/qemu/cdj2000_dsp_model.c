@@ -159,6 +159,7 @@ struct CdjDspModel {
     bool at_end;                        /* the position reached the record's end */
     bool end_ack;                       /* a 7 was published at a record switch: the request follows after end_ack_ns */
     int64_t end_ack_ns;
+    bool prev_record;                   /* CDJ_DSP_PREV_RECORD (default on): a reverse run reaching the start goes on into the previous track (record 255) */
     unsigned rev_start;                 /* CDJ_DSP_REV_START: state published once when a reverse run reaches the start (8; 0 = clamp at 0 only) */
     bool at_start;                      /* the reverse run is at the start */
     bool cue_search_seen;               /* MAIN sent the AUTO CUE search (+0x7ba0 = 7) since the last load (+0x7cb0 = 1) */
@@ -621,6 +622,7 @@ CdjDspModel *cdj_dsp_model_new(Chardev *external)
                          : g_strcmp0(getenv("CDJ_DSP_NEXT_RECORD"), "0") == 0 ? 0 : 2;
     model->rev_answer = getenv("CDJ_DSP_REV_ANSWER")
         ? strtol(getenv("CDJ_DSP_REV_ANSWER"), NULL, 0) : 0;
+    model->prev_record = g_strcmp0(getenv("CDJ_DSP_PREV_RECORD"), "0") != 0;
     model->rev_start = getenv("CDJ_DSP_REV_START")
         ? strtol(getenv("CDJ_DSP_REV_START"), NULL, 0) : 0;
     model->switch_hold_ms = getenv("CDJ_DSP_SWITCH_HOLD")
@@ -1595,9 +1597,20 @@ static void cdj_dsp_model_track_end(CdjDspModel *model, uint8_t *window, int64_t
          */
         unsigned i, next = 0;
 
-        for (i = 0; i + 1 < model->rec_count; i++) {
+        /* Record 255 is the PREVIOUS track of the list, which MAIN preloads behind the played one
+           (`+0x8120 = 0xff`): at the last track of a list it is the only record behind the played
+           one and must not be mistaken for a next track (v3-3: the deck played on into the track
+           before). */
+        for (i = 0; i < model->rec_count; i++) {
             if (model->rec_queue[i] == model->pos_record) {
-                next = model->rec_queue[i + 1];
+                unsigned j;
+
+                for (j = i + 1; j < model->rec_count; j++) {
+                    if (model->rec_queue[j] != 0xff) {
+                        next = model->rec_queue[j];
+                        break;
+                    }
+                }
                 break;
             }
         }
@@ -1695,7 +1708,26 @@ static void cdj_dsp_model_position_report(CdjDspModel *model, uint8_t *window,
 
             if (total <= 0) {
                 total = 0;
-                if (model->rev_start && !model->at_start) {
+                if (model->prev_record && !model->at_start && model->cue_search_seen
+                    && model->record_frames[0xff] && model->pos_record != 0xff) {
+                    /*
+                     * The deck's REV (and SLIP REV) at the start of a track goes to the PREVIOUS track of
+                     * the playlist (owner, 02.10).  MAIN has that track in the DSP's table as record 255;
+                     * the way back is the mirror of the track end: the DSP goes on into it, publishes
+                     * the 7, answers with the cue (8), and the deck stands cued on the previous track.
+                     */
+                    fprintf(stderr, "cdj2000-dsp: reverse run reached the start of record %u: going on "
+                            "into the previous record 255 (%u CD frames), +0x7bf8 = 7 once t=%.3f\n",
+                            model->pos_record, model->record_frames[0xff], now / 1e9);
+                    model->at_start = true;
+                    model->pos_record = 0xff;
+                    total = 0;
+                    stl_le_p(window + 0x7bf8, 7);
+                    model->end_ack = true;
+                    model->end_answer = model->switch_answer;
+                    model->end_answer_from_switch = true;
+                    model->end_ack_ns = now + model->switch_hold_ms * 1000000LL;
+                } else if (model->rev_start && !model->at_start) {
                     fprintf(stderr, "cdj2000-dsp: reverse run reached the start of record %u: "
                             "+0x7bf8 = %u once t=%.3f\n", model->pos_record, model->rev_start,
                             now / 1e9);
