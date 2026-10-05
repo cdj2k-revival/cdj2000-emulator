@@ -1288,6 +1288,10 @@ python -m tools.cdj_main.cosim_scenario --card $H/cardB.img --playlist-row 4 --t
   Since the base panel frame starts the slider at its centre (bytes 4/5 and 6/7 = 0x8000, `cdj_panel_frame`), a deck needs no `analog` at all to be at 0 % with a pitch
   word of 0x100000 in its status packets (`+0x8C` / `+0x98`, byte 0x21 = player number); before, both words were 0 until the slider was driven, and the stock SYNC engine on a following
   deck (BPM x pitch) held it still.  Check on a two-deck run: read those words of the `type 0x0a` packets (port 50002) in `OUT/hub/link.pcap`.
+- **Beat phase of one deck against another**: `python -m tools.cdj_main.beat_phase OUT/hub/link.pcap PLAYER_A PLAYER_B [--from S --to S --every S --json]` takes the
+  type 0x28 beat packets (UDP 50001, byte 0x21 = player number) and, for every beat of B, the closest PRECEDING beat of A, in milliseconds (mean, min, max, sd), plus the signed
+  offset to A's nearest beat (the first figure jumps by a period when B is slightly ahead).  A `--sync` hub (scripts/two-decks.sh) stamps guest time.  The player numbers are
+  negotiated: in the two-deck stand deck A usually becomes player 2 and deck B player 1 (read the "players with beats" line).  Tests: tests/test_beat_phase.py (synthetic captures).
 - SYNC probe of NEW FIRMWARE docs/38 step 0: the stock engine 0x04289AF4 follows another deck when, on the follower over gdb (PORT+3),
   `[0x04C0849C] = 1` (gate) and `[0x04C084A4]` = the other deck's PLAYER NUMBER (1..4; 0 and 0xFF switch it off; player numbers are negotiated, read byte 0x21 of the status
   packets). In 25 s it matches the other deck's tempo (rate = its actual BPM over the follower's own) and locks the beat phase to about 10 ms. Scripts:
