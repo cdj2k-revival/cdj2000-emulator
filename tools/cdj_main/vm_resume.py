@@ -6,13 +6,15 @@ A client that connects to the QEMU gdb stub and goes away without `c` or `D` (a 
 in the middle of a poll) leaves the machine stopped: 0 % CPU, guest time frozen at one value, and with the
 Pro DJ Link hub every other deck waits for its promise.  Connecting again and sending `D` starts it.
 """
-import sys
+import argparse
 
 from tools.cdj_main.gdbprobe import Rsp
 
 
 def main() -> int:
-    port = int(sys.argv[1])
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("port", type=int, help="the run's --port / CDJ_LINK_PORT (the gdb stub is PORT+3)")
+    port = parser.parse_args().port
     with Rsp(port + 3, timeout=5.0) as stub:
         stub.buf = b""
         print("stub answered:", stub.cmd("?", 3.0)[:20] or "(nothing)")
