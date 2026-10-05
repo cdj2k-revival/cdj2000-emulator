@@ -242,19 +242,27 @@ class Run:
     def press(self, key, hold_ms=100):
         self.panel("press", key, "--hold-ms", str(hold_ms))
 
+    RETRY_AFTER = 4.0           # guest seconds of silence before a press is repeated
+    PRESSES = 3                 # at most this many presses of one key for one step
+
     def press_for(self, what, key, check, guest_timeout):
-        """Press KEY and wait for CHECK; if nothing shows in half the time,
-        press once more.  A press that reached MAIN and still did nothing in
-        the GUI happens now and then (r55-1: ENCODER PUSH down 16.275 s, up
-        16.377 s, no ENTER); the second press is logged, never silent."""
-        self.press(key)
-        got = self.wait(what, check, guest_timeout / 2)
-        if got or (self.proc and self.proc.poll() is not None):
-            return got
-        print(f"  ({what}: no effect from {key}, pressed again)", flush=True)
-        self.repeats.append(what)
-        self.press(key)
-        return self.wait(what, check, guest_timeout / 2)
+        """Press KEY and wait for CHECK; while nothing shows, press again after RETRY_AFTER guest seconds (at most
+        PRESSES presses, GUEST_TIMEOUT in all).  The GUI drops a press that lands while it is refreshing its own
+        list (the browse requests come in bursts at 13.2, 16.2, 20.0, 20.5, 21.5 s ...: runs/emu-b3 deck A, press
+        down 16.110 s, no ENTER request, 4 s of silence); earlier the repeat came only after half of the timeout,
+        and a key that fell into two such bursts failed the step.  Every repeat is logged, never silent."""
+        got = None
+        for attempt in range(self.PRESSES):
+            if attempt:
+                print(f"  ({what}: no effect from {key}, pressed again)", flush=True)
+                self.repeats.append(what)
+            self.press(key)
+            last = attempt == self.PRESSES - 1
+            got = self.wait(what, check, guest_timeout - self.RETRY_AFTER * (self.PRESSES - 1) if last
+                            else self.RETRY_AFTER)
+            if got or (self.proc and self.proc.poll() is not None):
+                return got
+        return got
 
     # --------------------------------------------------------------- report --
     def snap(self, name):
@@ -330,6 +338,31 @@ def err_matching(run: Run, pattern: str, after: int = 0):
     return check
 
 
+def turn_down(run: Run, steps: int, since: int) -> None:
+    """Turn the select encoder STEPS clicks down, one at a time: after each click wait for the browse preview request
+    of the row it should have reached (or a later one) and click again when it does not come.  The GUI drops a click
+    that lands while it refreshes its list; sent blind with 0.3 s of wall time between them, the cursor stayed on row 0
+    in runs/emu-b1 ("no preview of row 4").  A click that came late is not repeated: any row at or past the wanted
+    one counts."""
+    def reached(row: int):
+        def check():
+            for _, words in run.requests(since):
+                m = re.match(r"^0000 0001 000b 0007 0002 ([0-9a-f]{4})$", words)
+                if m and int(m.group(1), 16) >= visible_row(row):
+                    return words
+            return None
+        return check
+
+    for row in range(1, steps + 1):
+        for attempt in range(3):
+            run.panel("rotary", "7", "+1")
+            if run.wait("turn", reached(row), 3.0):
+                break
+            print(f"  (row {row}: no preview after the click, clicked again)", flush=True)
+            run.repeats.append("turn")
+        time.sleep(0.3)
+
+
 def scenario(run: Run, args) -> None:
     run.start()
     if args.manual:
@@ -362,13 +395,15 @@ def scenario(run: Run, args) -> None:
     if not run.step("playlist", bool(got), got[1] if got else "no ENTER request"):
         return
     run.wait("settle", lambda: run.guest() >= got[0] + 2, 20)
-
-    for _ in range(args.playlist_row):
-        run.panel("rotary", "7", "+1")
-        time.sleep(0.3)
+    turn_down(run, args.playlist_row, mark)
     want = r"^0000 0001 000b 0007 0002 %04x" % visible_row(args.playlist_row)
     got = run.wait("select", request_matching(run, mark, want), 20)
-    if not run.step("select", bool(got), got[1] if got else f"no preview of row {args.playlist_row}"):
+    note = got[1] if got else f"no preview of row {args.playlist_row}"
+    if not got and any(re.match(r"^0000 0001 000b 000a ", w) for _, w in run.requests(mark)):
+        # The previews of the playlist list carry 0007, those of a track list 000a.  Seen in runs/emu-c8 deck A: one
+        # logged ENTER (16.158 s), the clicks went on, and at 20.06 s the GUI asked for a track list of its own accord.
+        note += " (the GUI entered the track list by itself: the one ENTER was handled again about 4 s later)"
+    if not run.step("select", bool(got), note):
         return
     run.wait("settle", lambda: run.guest() >= got[0] + 1, 20)
 
@@ -381,9 +416,7 @@ def scenario(run: Run, args) -> None:
     run.wait("list", payload_after(run, mark), 30)
     run.wait("settle", lambda: run.guest() >= got[0] + 3, 30)
 
-    for _ in range(args.track_row):
-        run.panel("rotary", "7", "+1")
-        time.sleep(0.3)
+    turn_down(run, args.track_row, mark)
     mark = len(run.main_lines())
     got = run.press_for("load", "17.0", request_matching(run, mark, r"^0000 0007 "), 20)
     if not got:
