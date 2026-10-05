@@ -1285,6 +1285,9 @@ python -m tools.cdj_main.cosim_scenario --card $H/cardB.img --playlist-row 4 --t
 - **TEMPO slider through `panel_control analog`**: field 2 is the position and field 3 its centre; the tempo is recomputed when field 2 changes, so set
   the centre first (`a3=0x8000`) and then the position (`a2=0x4000` = -5 %, `a2=0xFFFF` = +10 %)..  Measured: position 0x4000 / 0xC000 with centre 0x8000 give -5.1 % / +5.1 %,
   position 0xFFFF gives +10 %; moving the centre alone after the position was driven changes nothing.
+  Since the base panel frame starts the slider at its centre (bytes 4/5 and 6/7 = 0x8000, `cdj_panel_frame`), a deck needs no `analog` at all to be at 0 % with a pitch
+  word of 0x100000 in its status packets (`+0x8C` / `+0x98`, byte 0x21 = player number); before, both words were 0 until the slider was driven, and the stock SYNC engine on a following
+  deck (BPM x pitch) held it still.  Check on a two-deck run: read those words of the `type 0x0a` packets (port 50002) in `OUT/hub/link.pcap`.
 - SYNC probe of NEW FIRMWARE docs/38 step 0: the stock engine 0x04289AF4 follows another deck when, on the follower over gdb (PORT+3),
   `[0x04C0849C] = 1` (gate) and `[0x04C084A4]` = the other deck's PLAYER NUMBER (1..4; 0 and 0xFF switch it off; player numbers are negotiated, read byte 0x21 of the status
   packets). In 25 s it matches the other deck's tempo (rate = its actual BPM over the follower's own) and locks the beat phase to about 10 ms. Scripts:

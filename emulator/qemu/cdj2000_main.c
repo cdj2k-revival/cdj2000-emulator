@@ -782,6 +782,18 @@ static void cdj_panel_frame(uint8_t *frame)
     if (!cdj_nxs_profile && !reverse) {
         frame[15] |= 0x02;
     }
+    /*
+     * The TEMPO slider: payload bytes 4/5 are its position and bytes 6/7 its centre, big-endian
+     * (ANSWER-NEW-FIRMWARE-1003).  A frame of zeros is position 0 with centre 0, which MAIN turns into
+     * a pitch word of 0 in the status packet (+0x8C / +0x98), where a real deck, with its slider at
+     * rest, sends 0x100000 (0 %): the stock SYNC engine on a following deck multiplies the BPM by that
+     * pitch and the deck stood still.  So a frame that names no slider of its own starts with the
+     * slider at its centre; `analog 3` / `analog 2` still move it from there.
+     */
+    if (!cdj_nxs_profile && !frame[4] && !frame[5] && !frame[6] && !frame[7]) {
+        frame[4] = 0x80;
+        frame[6] = 0x80;
+    }
     if (cdj_panel_nr_keys < 0) {
         cdj_panel_keys_parse();
     }
