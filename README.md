@@ -59,12 +59,14 @@ a player. It is not a way to use a CDJ-2000 on a desktop.
 
 ## What does not
 
-* **No audio.** The DSP is a TI Aureus DA710 with a TMS320C674x core (see
+* **No verified live speaker audio.** The experimental NXS McASP1 WAV sink
+  has so far been checked at idle boot; connected PLAY output remains to be
+  validated. The DSP is a TI Aureus DA710 with a TMS320C674x core (see
   `RUNNING.md`), and `emulator/qemu/cdj_c674x.c` executes its instruction set
-  from TI's published SPRUFE8B - partially. The checked-in C674x tests and
-  `tools/cdj_dsp` audit/replay tools define the supported scope; instruction
-  coverage is incomplete and accepting a mnemonic does not establish support
-  for every encoding or correct execution.
+  from TI's published SPRUFE8B - partially: see `DSP_ARCHITECTURE_COVERAGE.md`
+  for what is and is not implemented. Instruction coverage is incomplete;
+  accepting a mnemonic does not establish support for all its encodings or
+  correct execution.
   Native NXS playback also depends on DSP device and timing behavior.
 * **No jog**, no pitch. The position report runs at nominal speed.
 * In the legacy scripted workflow, the detail waveform and beat grid reach the GUI through the link proxy
@@ -73,10 +75,13 @@ a player. It is not a way to use a CDJ-2000 on a desktop.
   ENTER contact; short clicks and long holds have different meanings.
 * Switching sources after boot is unreliable (six of eight); the card given at
   launch is reliable. The USB stick as a music source has not been tried.
-* The GUI simulator is about thirty times slower than the chip on real work,
-  and the live link has intermittent stalls and, rarely, a double fault. Run
-  it again; the fault line is in the simulator's log.
-* No link between players.
+* The default GUI simulator (GNU sim, `--gui-sim gdb`) is about thirty times
+  slower than the chip on real work, and the live link has intermittent stalls
+  and, rarely, a double fault. Run it again; the fault line is in the
+  simulator's log. `--gui-sim fast` runs the GUI board on a faster vendored
+  Blackfin core; see BUILD.md.
+* Pro DJ Link between players is limited to `tools/cdj_main/link_hub.py`
+  (emulated decks, and on macOS a real interface with `--bridge`).
 
 ## Firmware is not included
 
@@ -90,20 +95,52 @@ images, no disassembly, no screenshots.
 
 ### NXS research branch: interactive deck
 
-For firmware development, start a deck with a generated test track and local
-debugging in one command:
+For firmware development, start a deck in one command:
 
 ```sh
-python -m tools.cdj_main.nxs_vm --test-track --debug --lightweight --ui \
-  --seconds 1800 --fresh-link --functional-dsp-audio \
-  --source-key-at 300 --source-key-retries 0
+python -m tools.cdj_main.launch deck                  # generated test track
+CDJ_USB=path/to/usb.img python -m tools.cdj_main.launch deck   # your USB image
+python -m tools.cdj_main.launch deck --sd card.img --seconds 600
 ```
+
+`deck` is `nxs_vm --ui --debug --seconds 3600 --functional-dsp-audio
+--source-key-when-ready` with `--usb $CDJ_USB` or `--test-track`; any option
+you give wins. Ports are picked automatically (the first free block of 5980,
+5990, ...), the run directory is timestamped, and DSP capture is fault-only;
+pass `--no-lightweight` when you need every checkpoint and the event
+transcript for replay. `python -m tools.cdj_main.nxs_vm --help` groups the
+remaining options. `--dsp-thread` (the DSP on its own host thread) and
+`--gui-sim fast` are faster opt-ins that will become defaults once qualified.
 
 This creates a timestamped run under `runs/`, prints follow-up commands, and
 records the firmware and emulator hashes. The deck shows run progress below
 the LCD; **Diagnostics** provides session state, browser replies, frame age,
-recent actions, fault lines, and debugger endpoints. `--fresh-link` selects
-the existing experimental delivery mode used for native NXS loading.
+recent actions, fault lines, and debugger endpoints. Fresh-only link delivery
+is the NXS default because cached repeats saturated the GUI receive queue in
+connected runs. Use `--cached-link` only to compare the old transport behavior.
+The source key waits for the SD or USB browser table instead of a guessed timestamp.
+
+For McASP clock experiments, add `--virtual-mcasp-clock` alongside
+`--functional-dsp-audio`. This batches genuine transmit slots from the
+configured McASP1 clock while giving the DSP interpreter bounded time slices.
+Add `--host-dsp-audio-wav` to write that stream through QEMU's 44.1 kHz stereo
+WAV backend to `dsp-audio.wav` in the run directory. These modes are
+experimental and do not establish DSP instruction timing or connected PLAY
+output.
+
+For an offline clock-coupled experiment, use `--dsp-cycle-mcasp-clock` with
+`--functional-dsp-audio --render-dsp-audio-wav`. This advances each McASP1 slot
+after the configured number of modeled SYSCLK1 cycles (4,416 cycles per slot
+for the observed 44.1 kHz firmware setup). It runs more slowly than audio
+wall time and does not feed a live 44.1 kHz voice. A connected load and
+continuous nonzero output have not yet been verified in this mode.
+
+For a WAV paced by DSP slot progression, add `--render-dsp-audio-wav` with
+`--functional-dsp-audio`. This writes every McASP1 stereo slot pair to
+`dsp-render.wav` at the firmware's configured 44.1 kHz format. With the
+default packet-based slot scheduler, its header rate labels the sample
+sequence; it does not measure real-time playback or drive speakers. The same
+speaker limitation applies to the DSP-cycle experiment above.
 
 Agents can control the same run without locating ports:
 
@@ -138,8 +175,8 @@ E-7206 auth-chip error remains. Native NXS SD loading of `TESTTONE.WAV` was
 reproduced with stock firmware on 2026-09-15, including the ten-second duration
 on the display. USB track loading and audible playback remain unverified.
 The legacy functionality described above is not an NXS completion claim.
-See [DEVELOPING.md](DEVELOPING.md) and [RUNNING.md](RUNNING.md) for current
-usage and limitations.
+See [DEVELOPING.md](DEVELOPING.md), [RUNNING.md](RUNNING.md) and
+NXS_GUI_STALL.md for current evidence and limitations.
 
 The NXS launcher also accepts experimental `--sd IMAGE` and `--usb IMAGE`
 mounts. Generate a plain WAV/FAT32 fixture with
@@ -228,6 +265,12 @@ cannot turn those tests into skips.
 
 `GPL-2.0-or-later`. See [LICENSE](LICENSE), and [THIRD_PARTY.md](THIRD_PARTY.md)
 for what is patched and under what terms.
+
+One exception: `cdj-gui-run`, built from `emulator/bfin/`, is
+GPL-3.0-or-later as a whole, because `emulator/bfin/bfin_dsp.c` carries GNU
+sim (GDB 17.2) code; see [emulator/bfin/LICENSE.md](emulator/bfin/LICENSE.md).
+The rest of the repository, `emulator/qemu/` in particular, stays
+GPL-2.0-or-later.
 
 ## Not affiliated with Pioneer
 
