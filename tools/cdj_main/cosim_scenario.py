@@ -23,6 +23,7 @@ and with --load2-row N, the next track while the first one plays:
   load2     BROWSE, N detents, ENCODER PUSH -> the GUI's LOAD again
   stream2   MAIN sets the DSP a new stream (+0x8100 = 3 and a stream open),
             which the first load always does and a second one must too
+  loaded2   the second load closes the same way (+0x7ba0 = 4)
 
 --then KEY:SECONDS[,...] then presses more keys (payload byte.bit, 20.0 =
 BROWSE; rot+N / rot-N turns the select encoder; KEY@MS holds it MS ms), each
@@ -472,6 +473,11 @@ def scenario(run: Run, args) -> None:
             run, r"control \+0x8100 command 0x00000003 \(\+4\.\.(?: [0-9a-f]{8}){9}\)", err_mark),
             args.load_timeout)
         if not run.step("stream2", bool(got), got or "no new stream (+0x8100 = 3) for the second track"):
+            return
+        got = run.wait("loaded2", err_matching(run, r"control \+0x7ba0 command 0x00000004", err_mark),
+                       args.load_timeout)
+        if not run.step("loaded2", bool(got), "second load closed (+0x7ba0 = 4)" if got
+                        else "the second load never closed"):
             return
     then_keys(run, args.then)
 
