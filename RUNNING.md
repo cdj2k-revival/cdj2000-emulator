@@ -438,7 +438,7 @@ in the following historical section describe CDJ-2000. They are not verified
 NXS addresses. NXS successfully lists TESTTONE.WAV with status halfword 26
 still at `0x1000`; that value does not establish a mount or browse blocker.
 Native NXS panel ENTER and LOAD are verified; see
-[NXS_LINK_LOADING.md](NXS_LINK_LOADING.md) for the actual captures and timing.
+NXS_LINK_LOADING.md for the actual captures and timing.
 
 **Switching to a medium.** With a card image (`--sd card.img`, a rekordbox
 export on it) the launchers put the card in at 10 s and press its key at

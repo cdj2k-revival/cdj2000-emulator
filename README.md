@@ -164,7 +164,7 @@ reproduced with stock firmware on 2026-09-15, including the ten-second duration
 on the display. USB track loading and audible playback remain unverified.
 The legacy functionality described above is not an NXS completion claim.
 See [DEVELOPING.md](DEVELOPING.md), [RUNNING.md](RUNNING.md) and
-[NXS_GUI_STALL.md](NXS_GUI_STALL.md) for current evidence and limitations.
+NXS_GUI_STALL.md for current evidence and limitations.
 
 The NXS launcher also accepts experimental `--sd IMAGE` and `--usb IMAGE`
 mounts. Generate a plain WAV/FAT32 fixture with
