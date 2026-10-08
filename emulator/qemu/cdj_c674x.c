@@ -557,8 +557,16 @@ static bool read_transfer_counted(CdjC674xRead read, void *opaque,
     return true;
 }
 
+/* The read that completes a load: counts gap words. */
 static bool read_transfer(CdjC674xRead read, void *opaque, uint32_t address,
                           unsigned encoded_size, uint64_t *value)
+{
+    return read_transfer_counted(read, opaque, address, encoded_size, value, true);
+}
+
+/* Issue-time mapping probe: does not count. */
+static bool read_transfer_probe(CdjC674xRead read, void *opaque, uint32_t address,
+                                unsigned encoded_size, uint64_t *value)
 {
     return read_transfer_counted(read, opaque, address, encoded_size, value, false);
 }
@@ -1129,7 +1137,7 @@ static bool arm_scalar_memory(CdjC674xArm *x)
         if (pair) store_value |= (uint64_t)x->cpu->r[x->side][x->dst + 1] << 32;
         if ((!nonaligned && (address & (size - 1))) ||
             (is_store ? !write_transfer(x->write, x->opaque, address, store_value, encoded_size, false)
-                      : !read_transfer(x->read, x->opaque, address, encoded_size, &dummy)))
+                      : !read_transfer_probe(x->read, x->opaque, address, encoded_size, &dummy)))
             return stop(x->cpu, x->pc, x->insn->word, "unaligned or unmapped scalar memory access");
         if (is_store) {
             if (x->out->store_count == 24) return stop(x->cpu, x->pc, x->insn->word, "store queue full");
@@ -4522,8 +4530,7 @@ static bool execute_packet(CdjC674x *cpu, CdjC674x *out, unsigned peak[2],
             if (load->due > now + 2) { ++j; continue; }
             if (queued_memory_load(load) && load->due == now + 2) {
                 uint64_t data;
-                if (!read_transfer_counted(read, opaque, load->address, load->size,
-                                           &data, true))
+                if (!read_transfer(read, opaque, load->address, load->size, &data))
                     return stop(cpu, cpu->pc, 0, "RAM load mapping changed during execution");
                 if (load->sign_extend) data = sx(data, (load->size & 255) * 8);
                 load->value = data;
