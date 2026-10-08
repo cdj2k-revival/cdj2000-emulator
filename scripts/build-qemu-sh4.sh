@@ -76,7 +76,8 @@ for patch in "$@"; do
     [ "$index" -le "$applied" ] || break
     if ! grep -qxF "$(patch_id "$patch")" "$stamp" 2>/dev/null; then
         echo "$QEMU_SRC carries a different or unrecorded version of $(basename "$patch")." >&2
-        echo "Restore a clean tree and re-run, e.g.: git -C $QEMU_SRC checkout -- ." >&2
+        echo "Restore a clean tree (files the patches added too) and re-run, e.g.:" >&2
+        echo "  git -C $QEMU_SRC checkout -- . && git -C $QEMU_SRC clean -fd -e build" >&2
         exit 1
     fi
 done
