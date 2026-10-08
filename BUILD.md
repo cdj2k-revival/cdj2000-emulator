@@ -18,7 +18,7 @@ The NXS launcher resolves `bin/cdj-run.exe` and `CDJ_QEMU`. `--debug` and
 sockets on macOS.
 
 For the optional SH7764 EtherC/RTL8201FL localhost backend, custom Dante MAIN
-input, integration tests and evidence limitations, see [ETHERNET_LOCAL.md](ETHERNET_LOCAL.md).
+input, integration tests and evidence limitations, see ETHERNET_LOCAL.md.
 The normal QEMU build script includes the new controller/PHY automatically.
 Without `--ethernet-peer-port`, the launcher keeps the Ethernet link disconnected.
 
