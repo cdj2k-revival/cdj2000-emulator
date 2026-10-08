@@ -399,6 +399,11 @@ FIRMWARE_KEY_NAMES: dict[tuple[int, int], str] = {
     (21, 3): "MEMORY",
 }
 
+# The same table the other way round, so a key can be given by the name MAIN knows it by
+# ("delete", "memory", "hot cue a"); button_mask() reads it.
+FIRMWARE_NAME_TO_BIT: dict[str, tuple[int, int]] = {
+    name.lower(): bit for bit, name in FIRMWARE_KEY_NAMES.items()}
+
 # The four SOURCE keys, by the name a human types.
 #
 # **THIS TABLE WAS REVERSED UNTIL 2026-08-07, and it cost the project weeks.**
@@ -479,11 +484,14 @@ def apply_analog(payload: bytearray, field: int, value: int) -> None:
 
 
 def button_mask(name: str) -> tuple[int, int]:
-    """Resolve 'sd', '19.1' or '19:02' to a (payload byte, mask) pair.
+    """Resolve 'sd', 'delete', '19.1' or '19:02' to a (payload byte, mask) pair.
 
     A suffix after '-' names a way of pressing the same bit -- '20.3-hold' is
     MENU held down, the deck's UTILITY key -- and is not part of the bit.
     """
+    named = FIRMWARE_NAME_TO_BIT.get(name.strip().lower().replace("_", " "))
+    if named:
+        return named[0], 1 << named[1]
     key = name.strip().lower().split("-")[0]
     if key in BUTTON_NAMES:
         return BUTTON_NAMES[key]

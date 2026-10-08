@@ -160,6 +160,8 @@ class Run:
             command += ["--gui-env", item]
         if self.args.firmware:
             command += ["--firmware", str(self.args.firmware)]
+        for item in self.args.hold_key:
+            command += ["--hold-key", item]
         command += self.args.boot_arg
         (self.out / "command.txt").write_text(" ".join(command) + "\n")
         self.proc = subprocess.Popen(command, cwd=ROOT, env=env,
@@ -635,6 +637,9 @@ def main(argv=None) -> int:
     parser.add_argument("--gui-env", action="append", default=[], metavar="NAME=VALUE")
     parser.add_argument("--boot-arg", action="append", default=[], metavar="ARG",
                         help="extra boot_vm argument, e.g. --boot-arg=--trace=0x42596ee")
+    parser.add_argument("--hold-key", action="append", default=[], metavar="KEY[:SECONDS]",
+                        help="hold a panel key from guest time zero for SECONDS (default 20), "
+                             "e.g. delete:20 for the mod's safe mode")
     parser.add_argument("--dsp-trace", action="store_true")
     parser.add_argument("--no-play", action="store_true",
                         help="do not press PLAY after the load: with AUTO CUE off "

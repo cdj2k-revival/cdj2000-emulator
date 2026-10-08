@@ -665,17 +665,20 @@ static bool cdj_sdhi_dma_write(unsigned nr_bytes, const uint8_t *buffer);
  * only on a bit that is set now and was clear before -- so a key has to go down
  * and come back up.  CDJ_PANEL_KEYS is a semicolon-separated list of
  *
- *     <seconds>:<payload byte>:<hex mask>
+ *     <seconds>:<payload byte>:<hex mask>[:<hold seconds>]
  *
  * against the virtual clock, e.g. "35:19:04" for the SD SOURCE key at 35 s
  * (payload byte 19 bit 2, from the decoder at 0x28e44a; bit 1 is USB, the
  * firmware's own name table in tools/cdj_main/panel_control.py).  CDJ_PANEL_HOLD_MS
  * sets how long each stays down; the default is long enough for several frames.
+ * The optional fourth field holds that one key for its own time instead, so a
+ * key held while the deck is switched on is "0:21:04:20" (DELETE, the first 20 s).
  */
 #define PANEL_KEYS_MAX 16
 
 typedef struct CdjPanelKey {
     int64_t at_ns;
+    int64_t hold_ns;                    /* 0: CDJ_PANEL_HOLD_MS */
     unsigned byte;
     uint8_t mask;
 } CdjPanelKey;
@@ -705,6 +708,10 @@ static void cdj_panel_keys_parse(void)
         }
         key->mask = strtoul(end + 1, &end, 16);
         key->at_ns = (int64_t)(seconds * 1000000000.0);
+        key->hold_ns = 0;
+        if (*end == ':') {
+            key->hold_ns = (int64_t)(strtod(end + 1, &end) * 1000000000.0);
+        }
         if (key->byte < PANEL_FRAME_LEN - 2u) {
             info_report("cdj2000: panel key byte %u mask %#x at %.2f s",
                         key->byte, key->mask, seconds);
@@ -800,8 +807,9 @@ static void cdj_panel_frame(uint8_t *frame)
     now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     for (i = 0; i < cdj_panel_nr_keys; i++) {
         const CdjPanelKey *key = &cdj_panel_keys[i];
+        int64_t hold = key->hold_ns ? key->hold_ns : cdj_panel_hold_ns;
 
-        if (now >= key->at_ns && now < key->at_ns + cdj_panel_hold_ns) {
+        if (now >= key->at_ns && now < key->at_ns + hold) {
             frame[key->byte] |= key->mask;
         }
     }

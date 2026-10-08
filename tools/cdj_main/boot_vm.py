@@ -157,6 +157,14 @@ PORT = int(os.environ.get("CDJ_LINK_PORT", "5980"))
 # and tests/test_panel_names_match_the_firmware.py is what keeps them together.
 SOURCE_KEYS = {"link": 0x01, "usb": 0x02, "sd": 0x04, "disc": 0x08}
 
+
+def hold_key_entry(item: str) -> str:
+    """A --hold-key KEY[:SECONDS] as one CDJ_PANEL_KEYS entry, down from guest time zero."""
+    from tools.cdj_main.panel_control import button_mask
+    key, _, seconds = item.partition(":")
+    byte, mask = button_mask(key)
+    return "0:%d:%02x:%g" % (byte, mask, float(seconds or 20))
+
 WATCH = [
     ("panel state", 0x04FE29F4, "xp /1wx 0x04fe29f4"),
     # 0x04c084d0 + 4n is the one-hot flag for payload bit 19.n, and n is the
@@ -422,6 +430,11 @@ def main() -> int:
     parser.add_argument("--source-key-at", type=float, default=None,
                         help="virtual seconds at which to press it, after the "
                              "card has been mounted")
+    parser.add_argument("--hold-key", action="append", default=[], metavar="KEY[:SECONDS]",
+                        help="hold a panel key from guest time zero for SECONDS (default 20), as a "
+                             "person does who holds it while switching the deck on, e.g. "
+                             "--hold-key delete:20 (safe mode of the NEW FIRMWARE mod); KEY is a "
+                             "name MAIN knows (delete, memory, ...) or BYTE.BIT; repeatable")
     parser.add_argument("--poke", type=parse_poke, action="append", default=[],
                         metavar="ADDRESS=VALUE",
                         help="write a word into MAIN's memory while it runs, "
@@ -686,6 +699,10 @@ def main() -> int:
         keys = "%g:19:%02x" % (args.source_key_at, SOURCE_KEYS[source_key])
         print(f"# panel: {source_key.upper()} SOURCE key at "
               f"{args.source_key_at:g} s ({keys})")
+
+    for item in args.hold_key:
+        keys = ";".join(part for part in (keys, hold_key_entry(item)) if part)
+        print(f"# panel: {item} held from 0 s ({keys.split(';')[-1]})")
 
     print(f"# MAIN: {QEMU.name} -M cdj2000-main")
     board_stderr = open(args.stderr, "wb") if args.stderr else subprocess.DEVNULL
