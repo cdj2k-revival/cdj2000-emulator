@@ -421,6 +421,7 @@ class SyncHub(Hub):
         self.replay_index = 0
         self.replay_lap = 0
         self.replay_sent = 0
+        self.started = False
 
     def accept(self) -> None:
         super().accept()
@@ -528,8 +529,13 @@ class SyncHub(Hub):
 
     def grant(self, conn) -> int:
         joined = [c for c in self.clients.values() if c.get("joined")]
-        if len(joined) < self.decks_wanted:
-            return 0                # hold everyone at the start until all are in
+        if not self.started:
+            if len(joined) < self.decks_wanted:
+                return 0            # hold everyone at the start until all are in
+            self.started = True
+            self.event("start", decks=len(joined))
+        # From then on a deck that goes away (its machine closed) is simply not waited for: the hold used to
+        # come back with it (one joined < two wanted) and the deck left running froze at its last grant.
         grant = NEVER
         for other, client in self.clients.items():
             if other is not conn and client.get("joined"):
