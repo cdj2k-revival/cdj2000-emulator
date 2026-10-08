@@ -752,7 +752,8 @@ def main():
                              '(BFIN_GPIO_STRAP=0x8:0x8)')
     dsp.add_argument('--dsp-model', action='store_true',
                         help='behavioural DSP: answer MAIN without executing the C674x '
-                             '(fast; no audio or playback position, so not playback evidence)')
+                             '(fast; real-time transport position, no audio, so not audio '
+                             'or DSP evidence)')
     # TODO(default): make --dsp-thread the default for interactive runs once
     # the dsp-thread regression bisect finishes, keeping the
     # synchronous scheduler automatically whenever checkpoints are wanted
