@@ -101,3 +101,9 @@ documentation. See `LICENSE`. GPL-2.0-or-later was chosen because the board
 model is compiled into QEMU, which is GPL-2.0-only: a GPLv3-only board could
 not legally be linked into it, and a permissive licence would let the work be
 taken closed.
+
+The one exception is `emulator/bfin/`: the `cdj-gui-run` program built from
+it is GPL-3.0-or-later as a whole, because `bfin_dsp.c` carries GNU sim code
+(above). Its other files keep their GPL-2.0-or-later SPDX lines;
+`emulator/bfin/LICENSE.md` explains the combination and `emulator/bfin/COPYING3`
+has the licence text. Nothing in `emulator/bfin/` is linked into QEMU.
