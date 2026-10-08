@@ -7051,7 +7051,7 @@ static bool jit_memory(CdjC674x *cpu, const JitOp *op, bool enabled,
     } else {
         uint64_t dummy;
         if (!jit_read_mapped(read, opaque, address, encoded_size) &&
-            !read_transfer(read, opaque, address, encoded_size, &dummy))
+            !read_transfer_probe(read, opaque, address, encoded_size, &dummy))
             return false;
         if (cpu->load_count == 40) return false;
         uint64_t due = cpu->cycles + 5;
@@ -7806,7 +7806,7 @@ jk_exec_t(CdjC674x *cpu, const JitKernel *k, unsigned p, uint64_t c,
         } else {
             uint64_t dummy;
             if (!jit_read_mapped(read, opaque, address, encoded) &&
-                !read_transfer(read, opaque, address, encoded, &dummy))
+                !read_transfer_probe(read, opaque, address, encoded, &dummy))
                 goto decline;
         }
         m->e[o][slot].address = address;
@@ -9368,7 +9368,7 @@ LEAN_INLINE bool lean_issue(CdjC674x *cpu, const CdjC674xCacheEntry *e,
         } else {
             uint64_t dummy;
             if (!jit_read_mapped(read, opaque, address, encoded_size) &&
-                !read_transfer(read, opaque, address, encoded_size, &dummy))
+                !read_transfer_probe(read, opaque, address, encoded_size, &dummy))
                 return false;
             *jit_append_load(cpu, &L->undo) = (CdjC674xLoad){
                 .due = start + 5, .address = address, .bank = op->side,
@@ -9475,7 +9475,7 @@ LEAN_INLINE bool lean_issue(CdjC674x *cpu, const CdjC674xCacheEntry *e,
             uint64_t dummy;
             if (cpu->load_count == 40 ||
                 (!jit_read_mapped(read, opaque, address, 4) &&
-                 !read_transfer(read, opaque, address, 4, &dummy)))
+                 !read_transfer_probe(read, opaque, address, 4, &dummy)))
                 return false;
             for (unsigned j = 0; j < cpu->load_count; ++j)
                 if (cpu->loads[j].due == start + 5 &&
@@ -9501,7 +9501,7 @@ LEAN_INLINE bool lean_issue(CdjC674x *cpu, const CdjC674xCacheEntry *e,
         if (size == 8) data |= (uint64_t)cpu->r[bank][reg + 1] << 32;
         uint64_t dummy;
         if (load ? (!jit_read_mapped(read, opaque, address, size) &&
-                    !read_transfer(read, opaque, address, size, &dummy))
+                    !read_transfer_probe(read, opaque, address, size, &dummy))
                  : !ram_write_transfer(write, opaque, address, data, size,
                                        false))
             return false;
@@ -9765,7 +9765,7 @@ LEAN_INLINE __attribute__((unused)) bool lean_mem_prep(const CdjC674x *cpu, cons
     }
     uint64_t dummy;
     return jit_read_mapped(read, opaque, m->address, m->encoded) ||
-           read_transfer(read, opaque, m->address, m->encoded, &dummy);
+           read_transfer_probe(read, opaque, m->address, m->encoded, &dummy);
 }
 
 /* LOP_CB15's and LOP_CDPP's checks and fields (lean_issue's, no append;
@@ -9784,7 +9784,7 @@ lean_cb15_prep(const CdjC674x *cpu, const JitOp *op, DtsMem *m,
     }
     uint64_t dummy;
     return jit_read_mapped(read, opaque, m->address, 4) ||
-           read_transfer(read, opaque, m->address, 4, &dummy);
+           read_transfer_probe(read, opaque, m->address, 4, &dummy);
 }
 
 LEAN_INLINE __attribute__((unused)) bool
@@ -9806,7 +9806,7 @@ lean_cdpp_prep(const CdjC674x *cpu, const JitOp *op, DtsMem *m,
     }
     uint64_t dummy;
     return jit_read_mapped(read, opaque, m->address, size) ||
-           read_transfer(read, opaque, m->address, size, &dummy);
+           read_transfer_probe(read, opaque, m->address, size, &dummy);
 }
 
 /* A disabled LOP_MEM still declines while AMR is not ready. */
