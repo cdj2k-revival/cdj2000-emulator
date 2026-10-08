@@ -289,6 +289,8 @@ class Run:
         return ok
 
     def report(self):
+        if not self.out.exists():           # refused before the run began (a busy port): the refusal is the message
+            return
         lines = ["| step | result | guest s | note |", "|---|---|---|---|"]
         lines += [f"| {n} | {r} | {t:.2f} | {note}"
                   f"{' (pressed twice)' if n in self.repeats else ''} |"

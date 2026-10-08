@@ -13,6 +13,9 @@ set -e
 OUT=${1:?out dir (relative to the repo root)}; A=${2:?port A}; B=${3:?port B}
 CARD=${4:-runs/cards/aconcert/card.img}
 STOP_A=${STOP_A:-time}; STOP_B=${STOP_B:-loaded}
+# the card's menu: ROOT_ROW / PLAYLIST_ROW (a rekordbox card has the playlists on root row 4; runs/cards/var-s3 is
+# ROOT_ROW=4 PLAYLIST_ROW=0)
+ROOT_ROW=${ROOT_ROW:-0}; PLAYLIST_ROW=${PLAYLIST_ROW:-4}
 cd "$(dirname "$0")/.."
 H=$OUT/hub
 rm -rf "$H" "$OUT/a" "$OUT/b" "runs/tmp-$A" "runs/tmp-$B"
@@ -25,11 +28,11 @@ nohup .venv/bin/python -m tools.cdj_main.link_hub --sync --decks 2 --seconds "${
     --listen "unix:$PWD/$H/hub.sock" "$H" > "$H/hub.out" 2>&1 &
 echo $! > "$H/hub.pid"
 sleep 2
-.venv/bin/python -m tools.cdj_main.cosim_scenario --card "$H/cardA.img" --playlist-row 4 \
+.venv/bin/python -m tools.cdj_main.cosim_scenario --card "$H/cardA.img" --root-row "$ROOT_ROW" --playlist-row "$PLAYLIST_ROW" \
     --out "$OUT/a" --port "$A" --boot-arg="--link-hub=sync:unix:$PWD/$H/hub.sock" \
     --boot-arg=--link-mac=02:00:00:00:00:02 --stop-after "$STOP_A" --keep > "$OUT/a.out" 2>&1 &
 PA=$!
-.venv/bin/python -m tools.cdj_main.cosim_scenario --card "$H/cardB.img" --playlist-row 4 --track-row 1 \
+.venv/bin/python -m tools.cdj_main.cosim_scenario --card "$H/cardB.img" --root-row "$ROOT_ROW" --playlist-row "$PLAYLIST_ROW" --track-row 1 \
     --out "$OUT/b" --port "$B" --boot-arg="--link-hub=sync:unix:$PWD/$H/hub.sock" \
     --boot-arg=--link-mac=02:00:00:00:00:03 --stop-after "$STOP_B" --keep > "$OUT/b.out" 2>&1 &
 PB=$!
