@@ -677,7 +677,7 @@ def main(argv=None) -> int:
                         help="keys between the library and the first browse press, "
                              "e.g. 19.4@1500:3 (TIME/A.CUE held: AUTO CUE)")
     parser.add_argument("--stop-after", metavar="STEP",
-                        help="end the scenario after this step passes")
+                        help="end the scenario after this step passes (--then keys still follow it)")
     parser.add_argument("--keep", action="store_true",
                         help="leave the machine running after the last step")
     args = parser.parse_args(argv)
@@ -685,6 +685,8 @@ def main(argv=None) -> int:
     run = Run(args)
     try:
         scenario(run, args)
+        if args.stop_after and args.then and run.rows and run.rows[-1][:2] == (args.stop_after, "ok"):
+            then_keys(run, args.then)       # the scenario ended where it was told to; the keys go on from there
     finally:
         run.report()
         if not args.keep:
