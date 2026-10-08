@@ -14,8 +14,8 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-MAIN_C = (ROOT / "emulator/qemu/cdj2000_main.c").read_text()
-INPUT_C = (ROOT / "emulator/qemu/cdj2000_input.c").read_text()
+MAIN_C = (ROOT / "emulator/qemu/cdj2000_main.c").read_text(encoding="utf-8")
+INPUT_C = (ROOT / "emulator/qemu/cdj2000_input.c").read_text(encoding="utf-8")
 
 
 def panel_frame_body():
