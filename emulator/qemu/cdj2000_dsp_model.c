@@ -1509,6 +1509,23 @@ static void cdj_dsp_model_stream_seek(CdjDspModel *model, uint8_t *window,
 #define DSP_POS_VALID       0x7c14
 
 /*
+ * Whether MAIN has opened a stream for the record since the table was last
+ * cleared (a load's start, a flush).  record_frames[] is never cleared, so a
+ * length alone says only that the record existed once.
+ */
+static bool cdj_dsp_model_record_queued(const CdjDspModel *model, uint32_t record)
+{
+    unsigned i;
+
+    for (i = 0; i < model->rec_count; i++) {
+        if (model->rec_queue[i] == record) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
  * The end of a track (CDJ_DSP_TRACK_END).  MAIN hands the DSP each record's
  * length with the +0x8100 command that names it: +0x811c is the audio's
  * length in CD frames (75 a second) and +0x8120 the record (runs/cosim/te-1:
@@ -1529,15 +1546,14 @@ static void cdj_dsp_model_track_end(CdjDspModel *model, uint8_t *window, int64_t
     uint32_t frames;
     int64_t end_ms;
 
-    if (!model->track_end || model->pos_record >= 256) {
-        return;
-    }
     if (model->end_ack && now >= model->end_ack_ns) {
         /* The main pass adopts MAIN's request again (0x80048aa0), so the 7 at
            a record switch does not stay; held for ever, MAIN's DSP task waits
            its 10 s for an answer and re-streams.  Taken away after one pass
            MAIN's task sometimes missed it (nr-7, nr-8: no event 0x30), so it
-           lasts 100 ms. */
+           lasts 100 ms.  This comes before the CDJ_DSP_TRACK_END test below:
+           a reverse run's start arms the answer too (the position report),
+           and with CDJ_DSP_TRACK_END=0 that 7 was never answered. */
         model->end_ack = false;
         if (model->end_answer) {
             /*
@@ -1561,6 +1577,9 @@ static void cdj_dsp_model_track_end(CdjDspModel *model, uint8_t *window, int64_t
         } else {
             stl_le_p(window + 0x7bf8, model->last_request);
         }
+    }
+    if (!model->track_end || model->pos_record >= 256) {
+        return;
     }
     frames = model->record_frames[model->pos_record];
     if (!frames) {
@@ -1709,12 +1728,16 @@ static void cdj_dsp_model_position_report(CdjDspModel *model, uint8_t *window,
             if (total <= 0) {
                 total = 0;
                 if (model->prev_record && !model->at_start && model->cue_search_seen
+                    && cdj_dsp_model_record_queued(model, 0xff)
                     && model->record_frames[0xff] && model->pos_record != 0xff) {
                     /*
                      * The deck's REV (and SLIP REV) at the start of a track goes to the PREVIOUS track of
                      * the playlist (owner, 02.10).  MAIN has that track in the DSP's table as record 255;
                      * the way back is the mirror of the track end: the DSP goes on into it, publishes
                      * the 7, answers with the cue (8), and the deck stands cued on the previous track.
+                     * Only a record 255 opened for this load counts: the first track of a list has none,
+                     * and the length of an earlier load's 255 sent the model into a record MAIN no longer
+                     * holds (pr16-rev-1: track 2 loaded, then track 1; REV at its start, 7 and 8).
                      */
                     fprintf(stderr, "cdj2000-dsp: reverse run reached the start of record %u: going on "
                             "into the previous record 255 (%u CD frames), +0x7bf8 = 7 once t=%.3f\n",
@@ -1962,6 +1985,12 @@ void cdj_dsp_model_tick(CdjDspModel *model, uint8_t *window, size_t length)
                 model->pos_ms = 0;
                 model->pos_state = 0;
                 model->loop_on = false;
+                /* An answer still owed for a record switch belongs to the
+                   table just cleared: left armed (a load or a jump within
+                   CDJ_DSP_SWITCH_HOLD of the 7) it fired at the next PLAY,
+                   position 0 and +0x7bf8 = 8 on a deck that only started. */
+                model->end_ack = false;
+                model->at_start = false;
                 fprintf(stderr, "cdj2000-dsp: +0x7cb0 = %d flushes the DSP: record table, "
                         "levels and position report cleared, +0x7cd4 = 0xff%s t=%.3f\n",
                         word, word == 1 ? ", hot cue slots emptied" : "", now / 1e9);
