@@ -456,6 +456,31 @@ Check the board is there:
 qemu-system-sh4 -M help | grep cdj2000
 ```
 
+### Optional: ahead-of-time DSP regions from your own firmware
+
+`tools/cdj_dsp/aot_gen.py` compiles the hottest C674x packets of a DSP
+image to C. Its output is derived from the firmware, so it is never
+committed: you generate it from your own NXS firmware and hand it to the
+build.
+
+1. Capture DSP checkpoints of a run of your own firmware, e.g. boot and
+   play a track with `python -m tools.cdj_main.nxs_vm runs/aot-src
+   --no-lightweight --test-track` (checkpoints land in
+   `runs/aot-src/dsp-checkpoints/`).
+2. Profile one or more of them with the replay:
+   `CDJ_DSP_AOT_PROFILE=runs/aot-1.prof python -m tools.cdj_dsp.replay
+   CHECKPOINT runs/aot-replay-1 --functional-dsp-audio --steps 20000000`.
+3. Generate: `python tools/cdj_dsp/aot_gen.py runs/aot.inc runs/aot-*.prof`.
+4. Build with it: `CDJ_C674X_AOT_SOURCE=runs/aot.inc sh
+   scripts/build-qemu-sh4.sh QEMU_SRC` (without the variable, any earlier
+   copy is removed and the core builds without regions).
+
+`nxs_vm` turns compiled regions on when the binary has them (`--dsp-aot`,
+the default; `--no-dsp-aot` to compare). A region runs only for code whose
+bytes match what was profiled, so a stale file is slower, never wrong.
+Regenerate after changing `emulator/qemu/cdj_c674x.c`: the generator
+asserts the core's numbering and refuses a profile from another core.
+
 ### Rebuild immediately, and check the timestamp
 
 If a build of the board fails, the **old** `qemu-system-sh4` is still on disk
