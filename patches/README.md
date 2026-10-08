@@ -146,7 +146,8 @@ by default and off with `NAME=0` in QEMU's environment.
 | `CDJ_TB_FPSCR` | `LDS FPSCR` chains to the next instruction when PR/SZ/FR are unchanged instead of returning to the cpu loop |
 | `CDJ_JCPROF=1` | off by default: counts TB lookups per exit kind (rts, call, jmp, xpage, fpscr, stop, prediction miss) and jump-cache hit/empty/conflict/flags, plus the store-to-code counts; printed to stderr every 2^26 lookups and at exit |
 
-Measured on stock NXS MAIN with the behavioural DSP (see PERFORMANCE.md):
+Measured on stock NXS MAIN with the behavioural DSP (profile and throughput in
+[docs/SH4_TCG_FAST_PATHS.md](../docs/SH4_TCG_FAST_PATHS.md)):
 `CDJ_JCPROF` showed 99.6 % jump-cache hits (so the flat-hash `CDJ_JC_HASH` was
 not ported) and lookups split evenly between `jsr` and `rts`; the store path
 saw 8.5 M stores into code pages in a 27 s run and not one overlapped a TB.
