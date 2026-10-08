@@ -241,9 +241,11 @@ checkpoints are. The skip changes wall time only.
 
 MAIN then reaches its GUI link before the slower simulated GUI has booted and
 waits for a retry, so `--gui-head-start SECONDS` starts the GUI first (its
-link connection is lazy and retried); with the skip it defaults to 1.5 s
+link connection is lazy and retried); with the skip it defaults to 2.0 s
 (0.5 s measured too short, 1.0-2.0 s equivalent; the head start alone gives
-nothing).
+nothing). It was 1.5 s until the SH-4 fast paths below made MAIN's early boot
+twice as fast; 1.5 s then lost the race in 3 of 4 `--dsp-model` boots, each
+costing a ~3 s retry.
 
 Wall time from launch, `--lightweight`, same binary:
 
@@ -415,7 +417,6 @@ handshake, so the gain shows as throughput, not latency. The Not Loaded and
 USB-browser screens are byte-identical between builds; the loaded screen
 matches outside the blinking NOW LOADING text in every run where it was not
 mid-redraw (one in four for both builds).
-
 ## Persistent packet cache and fast paths (2026-10-05)
 
 Ideas after Stijn Jacobs' cdj-nxs2-qemu (its `c66x_step.c` packet cache and
