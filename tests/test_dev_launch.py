@@ -58,8 +58,9 @@ def test_gui_board_override_points_cfi_at_selected_flash(tmp_path):
     assert f'/core/bfin_ebiu_amc/cfi@0/file "{flash.resolve().as_posix()}"' == output.read_text().strip()
 
 
+@pytest.mark.parametrize('idle_skip', [True, False])
 def test_gui_firmware_override_launches_with_generated_board_and_records_it(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, idle_skip):
     for name in ('bin/cdj-run', 'build/qemu/build/qemu-system-sh4',
                  'firmware/nxs/main-firmware.bin'):
         path = tmp_path / name
@@ -75,8 +76,11 @@ def test_gui_firmware_override_launches_with_generated_board_and_records_it(
     monkeypatch.setattr(nxs_vm, 'ROOT', tmp_path)
     monkeypatch.setattr(nxs_vm, 'occupied_local_ports', lambda base, debug: [])
     monkeypatch.setattr(nxs_vm.sys, 'argv', [
-        'nxs_vm', 'run', '--seconds', '1', '--lightweight',
-        '--gui-firmware', str(gui)])
+        'nxs_vm', 'run', '--seconds', '1', '--lightweight', '--gui-sim', 'gdb',
+        '--gui-firmware', str(gui),
+        *([] if idle_skip else ['--no-dsp-idle-skip'])])
+    sleeps = []
+    monkeypatch.setattr(nxs_vm.time, 'sleep', sleeps.append)
 
     class Process:
         def __init__(self, is_gui):
@@ -115,7 +119,13 @@ def test_gui_firmware_override_launches_with_generated_board_and_records_it(
     assert manifest['dsp_event_capture_enabled'] is False
     assert manifest['dsp_checkpoint_policy'] == 'fault'
     assert manifest['architectural_validation_eligible'] is False
-    main_env = environments[0]
+    # The idle skip (default) starts the GUI 2.0 s ahead of MAIN; without it
+    # MAIN starts first, as before.
+    gui_first = '--model' in commands[0]
+    assert gui_first is idle_skip
+    assert sleeps[0] == (2.0 if idle_skip else 1)
+    main_env = environments[1 if gui_first else 0]
+    assert main_env.get('CDJ_NXS_DSP_IDLE_SKIP') == ('1' if idle_skip else None)
     assert main_env['CDJ_NXS_DSP_CHECKPOINT_POLICY'] == 'fault'
     assert main_env['CDJ_NXS_DSP_CHECKPOINT_DIR'] == str(tmp_path / 'run/dsp-checkpoints')
     assert 'CDJ_NXS_DSP_EVENTS' not in main_env
@@ -132,7 +142,8 @@ def test_stop_request_cleanly_stops_owned_processes(tmp_path, monkeypatch):
     monkeypatch.setattr(nxs_vm, 'ROOT', tmp_path)
     monkeypatch.setattr(nxs_vm, 'occupied_local_ports', lambda base, debug: [])
     monkeypatch.setattr(nxs_vm.sys, 'argv', [
-        'nxs_vm', 'run', '--seconds', '60', '--lightweight'])
+        'nxs_vm', 'run', '--seconds', '60', '--lightweight', '--debug',
+        '--gui-head-start', '0'])
     sleep_count = [0]
     def sleep(duration):
         sleep_count[0] += 1
@@ -161,6 +172,9 @@ def test_stop_request_cleanly_stops_owned_processes(tmp_path, monkeypatch):
     monkeypatch.setattr(nxs_vm.subprocess, 'Popen', launch)
 
     assert nxs_vm.main() == 0
+    manifest = json.loads((tmp_path / 'run/run.json').read_text())
+    if nxs_vm.UNIX_CONTROL:
+        assert manifest['endpoints']['qmp'] == str(tmp_path / 'run/qmp.sock')
     result = json.loads((tmp_path / 'run/result.json').read_text())
     session = json.loads((tmp_path / 'run/session.json').read_text())
     assert result['stop_requested'] is True
@@ -193,6 +207,9 @@ def test_test_track_and_sd_conflict_before_inputs_or_launch(tmp_path, monkeypatc
 @pytest.mark.parametrize('extra, message', [
     (['--source-key', 'bad-key'], '--source-key must be'),
     (['--source-key', '22:01'], '--source-key must be'),
+    (['--source-key-when-ready', '--debug'], 'requires --source-key sd or usb'),
+    (['--source-key-when-ready', '--debug', '--source-key', 'link'],
+     'supports only sd or usb'),
     (['--source-key-at', 'nan'], '--source-key-at must be finite'),
     (['--source-key-at', 'inf'], '--source-key-at must be finite'),
 ])
@@ -231,7 +248,7 @@ def test_debug_chardev_stays_unix_on_posix_and_tcp_on_windows(tmp_path, monkeypa
     monkeypatch.setattr(nxs_vm, 'ROOT', tmp_path)
     monkeypatch.setattr(nxs_vm, 'occupied_local_ports', lambda base, debug: [])
     monkeypatch.setattr(nxs_vm.sys, 'argv', [
-        'nxs_vm', 'run', '--seconds', '1', '--lightweight', '--debug',
+        'nxs_vm', 'run', '--seconds', '1', '--lightweight', '--gui-sim', 'gdb', '--debug',
         '--qemu-sync-profile'])
     commands = []
 
@@ -262,3 +279,24 @@ def test_debug_chardev_stays_unix_on_posix_and_tcp_on_windows(tmp_path, monkeypa
         assert any(part.startswith('tcp:127.0.0.1:') and 'server=on' in part for part in main)
         assert any(part.startswith('telnet:127.0.0.1:') for part in main)
         assert not any(part.startswith('unix:') for part in main)
+
+
+def test_port_defaults_to_first_free_block(monkeypatch):
+    monkeypatch.setattr(nxs_vm, 'occupied_local_ports',
+                        lambda base, debug: [base] if base < 6000 else [])
+    monkeypatch.setattr(nxs_vm, '_port_taken', lambda port: False)
+    assert nxs_vm.free_port_block(True, False) == 6000
+    monkeypatch.setattr(nxs_vm, 'occupied_local_ports', lambda base, debug: [base])
+    assert nxs_vm.free_port_block(True, False) is None
+
+
+def test_dsp_thread_is_default_unless_a_mode_needs_the_synchronous_dsp():
+    from types import SimpleNamespace
+    base = dict(dsp_model=False, lightweight=True, cosim=False, dsp_legacy_budget=None,
+                capture_dsp_fault_history=False, virtual_mcasp_clock=False,
+                dsp_cycle_mcasp_clock=False, render_dsp_audio_wav=False,
+                debug_paused=False)
+    assert nxs_vm.synchronous_dsp_reason(SimpleNamespace(**base)) is None
+    for name, value in (('lightweight', False), ('cosim', True), ('dsp_model', True),
+                        ('dsp_legacy_budget', 65536), ('capture_dsp_fault_history', True)):
+        assert nxs_vm.synchronous_dsp_reason(SimpleNamespace(**{**base, name: value}))

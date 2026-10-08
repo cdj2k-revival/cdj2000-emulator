@@ -697,6 +697,11 @@ def wait_playback(run: Path, timeout: float = 120, poll: float = 0.25,
     if isinstance(min_frames, bool) or not isinstance(min_frames, int) or min_frames <= 0:
         raise ValueError("min-frames must be a positive integer")
     _require_running(run)
+    manifest = _manifest(run)
+    if manifest.get("dsp_audio_clock") == "stopped-clock" and not manifest.get("dsp_model"):
+        # The real DSP only consumes PCM on McASP slots, so the counter cannot move.
+        raise ValueError("run uses the stopped DSP audio clock, so the counter cannot advance; "
+                         "relaunch with --functional-dsp-audio (or --dsp-model)")
     observer = LinkObserver()
     deadline = time.monotonic() + timeout
     previous = None
@@ -771,7 +776,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     sub.add_parser("stop")
     diagnostic = sub.add_parser("diagnose", help="capture bounded status, log tails and framebuffer for handoff")
     diagnostic.add_argument("output", type=Path, help="new diagnostic directory (must not exist)")
-    media = sub.add_parser("wait-media", help="wait for NXS card presence, readiness and mount latch (--debug required)")
+    media = sub.add_parser("wait-media", help="wait for NXS SD or USB source readiness (--debug required)")
+    media.add_argument("source", nargs="?", choices=("sd", "usb"), default="sd",
+                       help="source to observe (default: sd)")
     media.add_argument("--timeout", type=float, default=120, help="wall-clock seconds, 0 for one sample")
     media.add_argument("--poll", type=float, default=1, help="wall-clock seconds between samples")
     shot = sub.add_parser("screenshot")
@@ -819,7 +826,7 @@ def main(argv: list[str] | None = None) -> int:
             from tools.cdj_main.media_readiness import observe_run
             if _state(run) not in {"starting", "running"}:
                 raise ValueError("wait-media needs an active run; use diagnose or run_report for saved evidence")
-            result = observe_run(run, timeout=args.timeout, poll=args.poll)
+            result = observe_run(run, timeout=args.timeout, poll=args.poll, source=args.source)
             _action(run, "wait-media", outcome="matched" if result["ok"] else "timeout", **result)
             _json(result)
             return 0 if result["ok"] else 1
