@@ -468,9 +468,12 @@ build.
    play a track with `python -m tools.cdj_main.nxs_vm runs/aot-src
    --no-lightweight --test-track` (checkpoints land in
    `runs/aot-src/dsp-checkpoints/`).
-2. Profile one or more of them with the replay:
+2. Profile one or more of them with the replay, with the compiled paths
+   on (`--ab` turns them on; without them the profile stays empty):
    `CDJ_DSP_AOT_PROFILE=runs/aot-1.prof python -m tools.cdj_dsp.replay
-   CHECKPOINT runs/aot-replay-1 --functional-dsp-audio --steps 20000000`.
+   CHECKPOINT runs/aot-replay-1 --ab --trace-mode compact
+   --functional-dsp-audio --steps 20000000`. A checkpoint needs the
+   `manifest.json` written beside it.
 3. Generate: `python tools/cdj_dsp/aot_gen.py runs/aot.inc runs/aot-*.prof`.
 4. Build with it: `CDJ_C674X_AOT_SOURCE=runs/aot.inc sh
    scripts/build-qemu-sh4.sh QEMU_SRC` (without the variable, any earlier
