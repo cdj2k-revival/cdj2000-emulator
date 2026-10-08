@@ -162,6 +162,11 @@ class Run:
             command += ["--firmware", str(self.args.firmware)]
         for item in self.args.hold_key:
             command += ["--hold-key", item]
+        if self.args.dense_window:
+            # every frame of that stretch of guest time, kept at --dense-fps a second as PNG, and a GIF
+            command += ["--dense-frames", str(self.out / "dense"), "--dense-window", self.args.dense_window,
+                        "--dense-fps", str(self.args.dense_fps),
+                        "--dense-gif", str(self.out / "dense.gif")]
         command += self.args.boot_arg
         (self.out / "command.txt").write_text(" ".join(command) + "\n")
         self.proc = subprocess.Popen(command, cwd=ROOT, env=env,
@@ -640,6 +645,12 @@ def main(argv=None) -> int:
     parser.add_argument("--hold-key", action="append", default=[], metavar="KEY[:SECONDS]",
                         help="hold a panel key from guest time zero for SECONDS (default 20), "
                              "e.g. delete:20 for the mod's safe mode")
+    parser.add_argument("--dense-window", metavar="FROM:TO",
+                        help="keep every frame of this stretch of guest seconds (FROM: runs to the end) "
+                             "as PNG in OUT/dense/png and as OUT/dense.gif; needs the simulator with "
+                             "patch 15 (bin/cdj-run-frames)")
+    parser.add_argument("--dense-fps", type=float, default=10.0, metavar="N",
+                        help="frames kept per guest second of the dense window (default 10)")
     parser.add_argument("--dsp-trace", action="store_true")
     parser.add_argument("--no-play", action="store_true",
                         help="do not press PLAY after the load: with AUTO CUE off "

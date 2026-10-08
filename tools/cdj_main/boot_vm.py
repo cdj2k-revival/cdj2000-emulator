@@ -28,6 +28,7 @@ import argparse
 import os
 import re
 import shutil
+import signal
 import socket
 import struct
 import subprocess
@@ -572,6 +573,17 @@ def main() -> int:
                              "instead of one run per input")
     parser.add_argument("--frame-every", type=float, default=2.0,
                         metavar="SECONDS")
+    parser.add_argument("--dense-frames", metavar="DIR",
+                        help="every frame of a stretch of GUI time, thinned as it arrives: the simulator "
+                             "archives the frames of --dense-window (patch 15), --dense-fps of them a "
+                             "guest second are kept as PNG in DIR/png and the rest deleted at once, "
+                             "so a minute costs a few megabytes, not gigabytes")
+    parser.add_argument("--dense-window", default="0:", metavar="FROM:TO",
+                        help="guest seconds of the stretch (default the whole run); FROM: runs to the end")
+    parser.add_argument("--dense-fps", type=float, default=10.0, metavar="N",
+                        help="frames kept per guest second (default 10)")
+    parser.add_argument("--dense-gif", metavar="FILE",
+                        help="also write the kept frames as a GIF with guest-time delays")
     parser.add_argument("--gui-output", metavar="FILE",
                         help="keep the whole GUI-side stream (run_headless "
                              "plus the simulator's stderr).  Only the last 800 "
@@ -612,6 +624,9 @@ def main() -> int:
                              "a run looks like 'nobody writes that word' when "
                              "the evidence was simply thrown away")
     args = parser.parse_args()
+    # A shell that starts us in the background leaves SIGINT ignored, and then Ctrl-C or the SIGINT of
+    # cosim_scenario never reaches the finally below: no summary, no dense-frame GIF.  Ask for it.
+    signal.signal(signal.SIGINT, signal.default_int_handler)
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     if args.trace and args.poke:
         parser.error("--trace and --poke both need the gdb stub; run them "
@@ -787,6 +802,18 @@ def main() -> int:
         tracer.start()
         print("# trace: " + ", ".join("0x%08x" % a for a in trace_at)
               + "".join(" w:0x%08x:%d" % w for w in trace_watch))
+    dense = None
+    simulator = BFIN_SIM
+    if args.dense_frames:
+        from tools.cdj_main import frame_archive
+        simulator = frame_archive.archive_simulator(BFIN_SIM)
+        dense = frame_archive.DenseFrames(
+            Path(args.dense_frames), frame_archive.parse_window(args.dense_window), args.dense_fps,
+            lambda: frame_archive.guest_seconds(main_log),
+            Path(args.dense_gif) if args.dense_gif else None)
+        args.gui_env.append(dense.env())
+        print(f"# dense frames: {args.dense_window} guest s at {args.dense_fps:g} a second -> "
+              f"{args.dense_frames}/png ({simulator.name})")
     stop_frames = threading.Event()
     sampler = None
     sampler_report: dict = {}
@@ -798,6 +825,8 @@ def main() -> int:
             daemon=True)
         sampler.start()
         print(f"# frames: every {args.frame_every:g} s -> {args.frames}")
+    if dense:
+        dense.start()
     try:
         time.sleep(3)
         mon = socket.create_connection(("127.0.0.1", PORT + 1), timeout=5)
@@ -835,7 +864,7 @@ def main() -> int:
             [
                 sys.executable, "-m", "tools.cdj_gui.run_headless",
                 "--seconds", str(args.seconds),
-                "--simulator", str(BFIN_SIM),
+                "--simulator", str(simulator),
                 *(["--elf", args.gui_elf] if args.gui_elf else []),
                 *(["--board", args.gui_board] if args.gui_board else []),
                 "--packet", str(PACKETS / "status-standalone.bin"),
@@ -1065,6 +1094,10 @@ def main() -> int:
         stop_pokes.set()
         stop_frames.set()
         stop_trace.set()
+        if dense:
+            kept = dense.stop()
+            print(f"# dense frames: {kept} kept of {dense.seen} archived"
+                  + (f", GIF {args.dense_gif}" if args.dense_gif else ""))
         if sampler is not None:
             sampler.join(timeout=5)
             # A recording that stopped early has to say so.  Silence here is

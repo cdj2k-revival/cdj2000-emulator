@@ -167,6 +167,32 @@ Useful flags: `--frames DIR --frame-every 2` samples the screen on a fixed grid,
 and `--no-peer` switches off the canned MAIN answers so that what appears on
 screen came from the machine rather than from a file.
 
+## Dense frames, for an animation
+
+`--frames` samples the live frame on a wall-clock tick (2 s by default): enough for before and after, far too
+few for a GIF.  The simulator can publish every frame it draws (patch 15), about 55 a second of guest time, which
+is gigabytes for a minute.  `--dense-frames` arms that only inside a window of guest seconds, keeps
+`--dense-fps` frames per guest second as PNG and deletes the rest as they arrive:
+
+    python -m tools.cdj_main.cosim_scenario --card card.img --out runs/cosim/anim \
+        --dense-window 28:40 --dense-fps 10
+
+writes `runs/cosim/anim/dense/png/t<guest seconds>.png` and `dense.gif`, whose delays follow the guest stamps
+(it plays at guest speed however long the emulator took).  A 12 s window at 10 a second is about 110 frames and
+4 MB, from about 670 archived.  `boot_vm` takes the same as `--dense-frames DIR --dense-window FROM:TO
+--dense-fps N --dense-gif FILE`; it needs `--cosim` (the guest clock is MAIN's link log) and a simulator with
+patch 15 (`bin/cdj-run-frames`, or `bin/cdj-run` rebuilt from the current patch stack; `boot_vm` looks for the
+sibling by itself).  The window starts a second early so the archive is already armed; the GIF is written when
+the run ends, so stop it with SIGINT (`cosim_scenario` does), not a kill.
+
+## A key held from the first second
+
+`boot_vm --hold-key KEY[:SECONDS]` (also `cosim_scenario`) holds a panel key from guest time zero for SECONDS
+(default 20), the way a person holds it while switching the deck on: `--hold-key delete:20` is the NEW FIRMWARE
+mod's safe mode.  KEY is a name MAIN knows (`delete`, `memory`, `hot cue a`) or `BYTE.BIT`.  It writes a
+`CDJ_PANEL_KEYS` entry `0:<byte>:<mask>:<seconds>`; the fourth field is the entry's own hold time (see
+INPUT_MANIFEST.md).
+
 ## The GUI board on its own
 
 The Blackfin board runs without MAIN if you feed it MAIN's side of the
