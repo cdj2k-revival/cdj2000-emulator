@@ -1,5 +1,8 @@
 """Small, host-only checks for the agent-oriented NXS launcher affordances."""
 import json
+from pathlib import Path
+import struct
+
 import pytest
 
 from tools.cdj_main import nxs_vm
@@ -262,3 +265,75 @@ def test_debug_chardev_stays_unix_on_posix_and_tcp_on_windows(tmp_path, monkeypa
         assert any(part.startswith('tcp:127.0.0.1:') and 'server=on' in part for part in main)
         assert any(part.startswith('telnet:127.0.0.1:') for part in main)
         assert not any(part.startswith('unix:') for part in main)
+
+
+def _stock_inputs(tmp_path):
+    for name in ('bin/cdj-run', 'build/qemu/build/qemu-system-sh4',
+                 'firmware/nxs/main-firmware.bin',
+                 'firmware/nxs/gui-boot-memory.elf',
+                 'firmware/nxs/gui-flash-image.bin'):
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(name.encode())
+
+
+def test_link_hub_and_mac_reach_main_and_the_manifest(tmp_path, monkeypatch):
+    _stock_inputs(tmp_path)
+    monkeypatch.setattr(nxs_vm, 'ROOT', tmp_path)
+    monkeypatch.setattr(nxs_vm, 'occupied_local_ports', lambda base, debug: [])
+    monkeypatch.setattr(nxs_vm.sys, 'argv', [
+        'nxs_vm', 'run', '--seconds', '1', '--lightweight',
+        '--link-hub', 'unix:/segment/hub.sock', '--link-mac', '02:43:44:01:02:03'])
+    commands = []
+
+    class Process:
+        def __init__(self, is_gui):
+            self.is_gui, self.stopped, self.pid = is_gui, False, 123
+        def poll(self):
+            return 0 if self.is_gui or self.stopped else None
+        def terminate(self):
+            self.stopped = True
+        def wait(self, timeout):
+            return 0
+
+    def launch(command, **kwargs):
+        commands.append(command)
+        if '--model' in command:
+            (tmp_path / 'run/screen.ppm').write_bytes(FRAME)
+        return Process('--model' in command)
+    monkeypatch.setattr(nxs_vm.subprocess, 'Popen', launch)
+    assert nxs_vm.main() == 0
+    main = next(command for command in commands if '-M' in command)
+    netdev = main[main.index('-netdev') + 1]
+    assert netdev == 'stream,id=djlink,server=off,addr.type=unix,addr.path=/segment/hub.sock'
+    assert main[main.index('-net') + 1] == 'nic,model=cdj-nxs-ethernet,netdev=djlink'
+    assert '-nic' not in main
+    # The stock image is untouched; MAIN boots a run-local copy with the record.
+    bios = Path(main[main.index('-bios') + 1])
+    assert bios == tmp_path / 'run/main-flash-mac.bin'
+    flash = bios.read_bytes()
+    assert flash[0x3F8000:0x3F8006] == struct.pack('<3H', 0x0243, 0x4401, 0x0203)
+    assert (tmp_path / 'firmware/nxs/main-firmware.bin').read_bytes() == b'firmware/nxs/main-firmware.bin'
+    ethernet = json.loads((tmp_path / 'run/run.json').read_text())['ethernet']
+    assert ethernet['peer'] == 'unix:/segment/hub.sock'
+    assert ethernet['mac'] == '02:43:44:01:02:03'
+    assert ethernet['flash'] == str(bios)
+
+
+@pytest.mark.parametrize('extra', [
+    ['--link-hub', 'sync:unix:/segment/hub.sock'],
+    ['--link-hub', '6600', '--ethernet-peer-port', '6601'],
+    ['--link-hub', 'localhost:hub'],
+    ['--link-mac', '03:00:00:00:00:01'],
+    ['--link-mac', '02:00:00:00:ff:ff'],
+    ['--link-mac', '02:00:00:00:01'],
+])
+def test_link_options_are_refused_before_the_run_exists(tmp_path, monkeypatch, extra):
+    _stock_inputs(tmp_path)
+    monkeypatch.setattr(nxs_vm, 'ROOT', tmp_path)
+    monkeypatch.setattr(nxs_vm, 'occupied_local_ports', lambda base, debug: [])
+    monkeypatch.setattr(nxs_vm.sys, 'argv', ['nxs_vm', 'run', '--seconds', '1', *extra])
+    with pytest.raises(SystemExit) as error:
+        nxs_vm.main()
+    assert error.value.code == 2
+    assert not (tmp_path / 'run').exists()
