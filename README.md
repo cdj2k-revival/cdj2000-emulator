@@ -224,11 +224,14 @@ recent diagnostic lines.
 ```sh
 pip install -r requirements.txt
 sh scripts/build-bfin-sim.sh                                   # the GUI board
-git clone --depth 1 https://gitlab.com/qemu-project/qemu.git /c/qemu-src
+git init /c/qemu-src && git -C /c/qemu-src fetch --depth 1 \
+    https://gitlab.com/qemu-project/qemu.git 55347990687e7bc5b6b0d624f290025726e8fbfa \
+    && git -C /c/qemu-src checkout FETCH_HEAD        # the pinned QEMU, see BUILD.md
 sh scripts/build-qemu-sh4.sh /c/qemu-src                       # the MAIN board
 # put C2KGUI.UPD and C2KMAIN.UPD in firmware/, then:
 python -m tools.cdj_gui.extract     firmware/C2KGUI.UPD  firmware
 python -m tools.cdj_gui.main_unpack firmware/C2KMAIN.UPD firmware
+python -m tools.cdj_gui.build_status_record packets/status-standalone.bin
 python -m tools.cdj_main.view_vm
 ```
 
