@@ -36,8 +36,8 @@ device modelling that only makes sense for this player.
 
 | | |
 |---|---|
-| what | `qemu-system-sh4`, version 11.x or newer |
-| where from | `https://gitlab.com/qemu-project/qemu.git`, cloned by you; `scripts/build-qemu-sh4.sh` builds it |
+| what | `qemu-system-sh4`, revision `55347990` (11.1.50) |
+| where from | `https://gitlab.com/qemu-project/qemu.git`, fetched by you (`BUILD.md`); `scripts/build-qemu-sh4.sh` builds it |
 | licence | GPL-2.0-only for the emulator as a whole |
 | our changes | `patches/qemu-sh-intc-priority-imask.patch`, `qemu-sh-intc-priority-order.patch`, `qemu-sh-tmu-stop-reset.patch`, `qemu-sh4-tcg-fast-paths.patch` |
 
@@ -56,8 +56,9 @@ The board model in `emulator/qemu/` is our own code, not a patch. The build
 script copies it into a QEMU checkout and wires it into meson and Kconfig
 there, so nothing in this repository is a modified QEMU file.
 
-QEMU 11.x or newer is required: the board includes `hw/core/boards.h` and
+QEMU 11.x is required: the board includes `hw/core/boards.h` and
 `system/address-spaces.h`, which are the post-reorganisation header paths.
+Current `master` no longer takes the patches, so `BUILD.md` pins the revision.
 
 
 ## cdj-nxs2-qemu -- the Blackfin core behind `cdj-gui-run`

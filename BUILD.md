@@ -520,8 +520,10 @@ the ones that read a real firmware image; see FIRMWARE.md. `tests/cstub/`
 compiles `emulator/qemu/cdj2000_input.c` on the host against stub QEMU headers,
 so the panel input protocol is tested without QEMU at all.
 
-The tests that start the board look for `qemu-system-sh4` on `PATH` or in
-`CDJ_QEMU`, and skip when it is in neither, so set it for a full run:
+The tests that start the board read `CDJ_QEMU` (default
+`build/qemu/build/qemu-system-sh4`) and skip when that file is not there, so
+set it for a full run. `test_qemu_sh4_irq_timer` and `test_sh7764_ata` read
+`CDJ_TEST_QEMU` instead:
 
 ```sh
 CDJ_QEMU=/c/qemu-src/build/qemu-system-sh4 pytest -q
