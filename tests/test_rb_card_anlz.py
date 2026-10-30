@@ -8,9 +8,7 @@ the folder under /.PIONEER in the row; MAIN 4.33 opens it under /PIONEER.
 
 import pytest
 
-pytest.importorskip("rekordbox_pdb")  # rb_card's own import; not in requirements
-
-from tools.cdj_main.rb_card import anlz_dir  # noqa: E402
+from tools.cdj_main.anlz_path import anlz_dir, free_stem
 
 REKORDBOX = [
     ("/Contents/[a]pendics.shuffle/Framed And Defamed/01 A1 - It's In The Eyes.mp3", "P017/0000CA47"),
@@ -33,3 +31,9 @@ REKORDBOX = [
 @pytest.mark.parametrize("path, folder", REKORDBOX)
 def test_folder_matches_rekordbox(path, folder):
     assert anlz_dir(path) == "/PIONEER/USBANLZ/" + folder
+
+
+def test_a_second_track_in_one_folder_takes_the_next_name(tmp_path):
+    assert free_stem(tmp_path) == "ANLZ0000"
+    (tmp_path / "ANLZ0000.DAT").touch()
+    assert free_stem(tmp_path) == "ANLZ0001"

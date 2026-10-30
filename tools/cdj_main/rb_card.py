@@ -41,6 +41,8 @@ import rekordbox_pdb
 from rekordbox_pdb.edit import PdbEditor
 from rekordbox_pdb.pdb import TableType
 
+from tools.cdj_main.anlz_path import anlz_dir, free_stem
+
 REPO = Path(__file__).resolve().parents[2]
 RB_SHARE = Path.home() / "Library/Pioneer/rekordbox/share"
 BASE_PDB = Path(rekordbox_pdb.__file__).resolve().parents[2] / "tests/data/one-song-export.pdb"
@@ -106,28 +108,6 @@ def rewrite_ppth(data: bytes, card_path: str) -> bytes:
     return bytes(out)
 
 
-def anlz_dir(card_path: str) -> str:
-    """The analysis folder MAIN 4.33 opens for CARD_PATH.
-
-    MAIN does not read the track row's analyze_path: it hashes the file path
-    (0x04258214, over UTF-16 code units, mod 200003) and builds
-    `P%03X/%08X` from that number (0x042596ee; the P folder is bits
-    0,2,6,7,9,13,16 of it).  It is the folder rekordbox writes: all 12
-    tracks of rekordbox-pdb's bigger-export.pdb agree.  With any other folder
-    MAIN never opens the DAT, answers the GUI's overview request with an
-    empty record (console `♪WAVE[0,0]`) and has no beat grid: the track
-    loads with a flat overview and an empty BPM box."""
-    n = 0
-    units = card_path.encode("utf-16-le")
-    for unit in struct.unpack("<%dH" % (len(units) // 2), units):
-        n = ((n * 0x5BC9 + unit) * 0x93B5 + unit) & 0xFFFFFFFF
-    n %= 200003
-    folder = 0
-    for out_bit, in_bit in enumerate((0, 2, 6, 7, 9, 13, 16)):
-        folder |= (n >> in_bit & 1) << out_bit
-    return "/PIONEER/USBANLZ/P%03X/%08X" % (folder, n)
-
-
 def playlist_contents(db, names: list[str]) -> list[tuple[str, list]]:
     playlists = []
     for name in names:
@@ -185,11 +165,13 @@ def main(argv: list[str] | None = None) -> int:
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, destination)
             anlz = RB_SHARE / (content.AnalysisDataPath or "").lstrip("/")
-            (stick / analysis.lstrip("/")).mkdir(parents=True)
+            folder = stick / analysis.lstrip("/")
+            folder.mkdir(parents=True, exist_ok=True)
+            stem = free_stem(folder)
             for extension in ANLZ_EXTENSIONS:
                 original = anlz.with_suffix(extension)
                 if original.exists():
-                    (stick / analysis.lstrip("/") / original.name).write_bytes(
+                    (folder / (stem + extension)).write_bytes(
                         rewrite_ppth(original.read_bytes(), card_path))
 
             track_ids[content.ID] = editor.add_track(
@@ -202,7 +184,7 @@ def main(argv: list[str] | None = None) -> int:
                 key=nfc(content.KeyName) or None,
                 label=nfc(content.LabelName) or None,
                 comment=nfc(content.Commnt),
-                analyze_path=analysis + "/ANLZ0000.DAT",
+                analyze_path=f"{analysis}/{stem}.DAT",
                 tempo=int(content.BPM or 0),
                 duration=int(content.Length or 0),
                 bitrate=int(content.BitRate or 0),
