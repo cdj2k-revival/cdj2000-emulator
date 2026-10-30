@@ -42,8 +42,9 @@ def records(stream: Path, block: int = 8192) -> dict[int, bytes]:
     """The BLOCK-byte data blocks of each record, joined in arrival order.
 
     A WAV record (block != 8192) is placed by the 64-byte tail that follows each block: its first word is
-    4 * the block's number in the file.  The deck streams the first 40 blocks at the load and starts again
-    from block 0 at PLAY, so the blocks of a record come in more than once; the number puts each in its place."""
+    where the block starts in the file, in units of 588 frames (1/75 s, a quarter of a block).  The deck streams
+    the start of the file at the load and again at PLAY, and the second run need not start on the first one's
+    grid (stock MAIN 4.33: words 0, 4, 8.. and then 1, 5, 9..), so blocks overlap; each goes where its word says."""
     data = stream.read_bytes()
     joined: dict[int, list[bytes]] = {}
     placed: dict[int, dict[int, bytes]] = {}
@@ -59,13 +60,17 @@ def records(stream: Path, block: int = 8192) -> dict[int, bytes]:
             else:
                 pending = (record, body)
         elif length == 64 and pending and block != 8192:
-            number = int.from_bytes(body[:4], "little") // 4
-            placed.setdefault(pending[0], {})[number] = pending[1]
+            word = int.from_bytes(body[:4], "little")
+            placed.setdefault(pending[0], {})[word] = pending[1]
             pending = None
         at += 32 + length
     out = {record: b"".join(blocks) for record, blocks in joined.items()}
-    for record, numbered in placed.items():
-        out[record] = b"".join(numbered.get(n, bytes(block)) for n in range(max(numbered) + 1))
+    unit = block // 4
+    for record, blocks in placed.items():
+        whole = bytearray((max(blocks) + 4) * unit)
+        for word, body in blocks.items():
+            whole[word * unit:word * unit + block] = body
+        out[record] = bytes(whole)
     return out
 
 

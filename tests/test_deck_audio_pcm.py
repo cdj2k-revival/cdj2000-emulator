@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """A WAV record in the DSP stream dump: blocks of 2352 frames, each followed by a 64-byte tail whose first word is
-4 * the block's number in the file; the deck streams the first blocks at the load and again from block 0 at PLAY."""
+where the block starts in the file, in 588-frame units; the deck streams the start of the file at the load and at PLAY."""
 import numpy as np
 
 from tools.cdj_main import deck_audio as da
@@ -18,7 +18,7 @@ def dump(blocks, numbers):
     out = b""
     for n, (number, body) in enumerate(zip(numbers, blocks)):
         out += chunk(da.DATA_OFFSETS[n % 2], body)
-        out += chunk(0xBDE0, (4 * number).to_bytes(4, "little") + bytes(60))
+        out += chunk(0xBDE0, int(4 * number).to_bytes(4, "little") + bytes(60))
     return out
 
 
@@ -29,6 +29,17 @@ def test_blocks_are_placed_by_their_number_and_a_restart_does_not_shift_them(tmp
     path = tmp_path / "stream.bin"
     path.write_bytes(dump([file_blocks[n] for n in order], order))
     assert da.records(path, BLOCK)[1] == b"".join(file_blocks)
+
+
+def test_a_restart_off_the_block_grid_stays_in_place(tmp_path):
+    # As stock MAIN 4.33 sent a WAV: the load's words are 0, 4, 8.., and PLAY's are 1, 5, 9.. -- a quarter of a
+    # block later, so its blocks straddle the load's.
+    whole = np.arange(BLOCK * 2, dtype="<u2").tobytes()
+    unit = BLOCK // 4
+    words = [0, 4, 1, 5, 9]
+    path = tmp_path / "stream.bin"
+    path.write_bytes(dump([whole[w * unit:w * unit + BLOCK] for w in words], [w / 4 for w in words]))
+    assert da.records(path, BLOCK)[1] == whole[:13 * unit]
 
 
 def test_a_missing_block_is_silence(tmp_path):

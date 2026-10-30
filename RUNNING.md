@@ -836,7 +836,16 @@ record and decoded with ffmpeg, then played by the transport log -- silence whil
 deck stands, jumps at CUE and loops, the tempo word as the rate. Measured 2026-09-23
 (`runs/cosim/audio-2`): 20 s after PLAY, correlation 1.0000 with the original file
 over 15 s, 22.7 ms in (the zero first block). This is not the DSP: no master tempo,
-EQ or effects, and a WAV track's PCM stream is not handled yet.
+EQ or effects.
+
+A WAV track's stream takes `deck_audio --pcm 16` (or `24`; `cosim_scenario --audio` does
+not pass it, so a WAV comes out silent there): blocks of 2352 frames (9408 or 14112 bytes) in
+the same two halves, each followed by a 64-byte tail (+0xbde0 / +0xfaa0) whose first word
+is where the block starts in the file, in units of 588 frames (1/75 s, a quarter of a block).
+Measured 2026-10-30, stock MAIN 4.33 on the DSP model, 16 bit 44.1 kHz: 30 blocks at the
+load with words 0, 4, 8.., 30 at PLAY with words 1, 5, 9.., and then no more, with or without
+`CDJ_DSP_CONSUME`. So the render holds the track's first 1.6 s, byte for byte the file's, and
+nothing after them. 24 bit has not been measured.
 
 `gui_update_check` is the gate for a GUI update file, the GUI board's counterpart of
 `safety_check`: in one guest time, stock MAIN 4.33 in the update key mode installs
