@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-import select
 import subprocess
 
 import pytest
+
+from tests.qtest_pipe import read_reply
 
 ROOT = Path(__file__).resolve().parents[1]
 DMAC = 0x1F608000
@@ -37,8 +38,7 @@ def dma(tmp_path):
 
         def command(line):
             proc.stdin.write((line + "\n").encode())
-            assert select.select([proc.stdout], [], [], 5)[0], "QEMU qtest timed out"
-            response = proc.stdout.readline().decode().strip()
+            response = read_reply(proc.stdout, 5)
             assert response.startswith("OK"), response
             return response[2:].strip()
 

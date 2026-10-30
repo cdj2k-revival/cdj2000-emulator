@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-import select
 import subprocess
 
 import pytest
+
+from tests.qtest_pipe import read_reply
 
 ROOT = Path(__file__).resolve().parents[1]
 SDRAM = 0x04000000
@@ -43,8 +44,7 @@ def power_on(tmp_path, fill, machine="cdj2000-main"):
             seen = []
             for address in PROBES:
                 proc.stdin.write(f"read {address:#x} {LEN:#x}\n".encode())
-                assert select.select([proc.stdout], [], [], 10)[0], "QEMU qtest timed out"
-                response = proc.stdout.readline().decode().strip()
+                response = read_reply(proc.stdout, 10)
                 assert response.startswith("OK"), response
                 seen.append(bytes.fromhex(response[2:].strip()[2:]))
         finally:

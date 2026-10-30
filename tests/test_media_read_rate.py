@@ -12,14 +12,11 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-import select
 import subprocess
 
 import pytest
 
-# The qtest pipe is polled with select(), which Windows only allows on sockets.
-pytestmark = pytest.mark.skipif(
-    os.name == "nt", reason="select() on pipes is not supported on Windows")
+from tests.qtest_pipe import read_reply
 
 ROOT = Path(__file__).resolve().parents[1]
 SDHI = 0xFFE40000
@@ -66,8 +63,7 @@ def board(tmp_path):
 
         def qtest(line: str) -> str:
             proc.stdin.write((line + "\n").encode())
-            assert select.select([proc.stdout], [], [], 10)[0], "QEMU qtest timed out"
-            response = proc.stdout.readline().decode().strip()
+            response = read_reply(proc.stdout, 10)
             assert response.startswith("OK"), response
             return response[2:].strip()
 
