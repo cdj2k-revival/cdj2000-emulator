@@ -43,7 +43,9 @@ TARGET=qemu-system-sh4$EXE
 
 if [ ! -f "$QEMU_SRC/hw/sh4/meson.build" ]; then
     echo "not a QEMU source tree: $QEMU_SRC" >&2
-    echo "git clone --depth 1 https://gitlab.com/qemu-project/qemu.git $QEMU_SRC" >&2
+    echo "git init $QEMU_SRC && git -C $QEMU_SRC fetch --depth 1 \\" >&2
+    echo "    https://gitlab.com/qemu-project/qemu.git 55347990687e7bc5b6b0d624f290025726e8fbfa \\" >&2
+    echo "    && git -C $QEMU_SRC checkout FETCH_HEAD    # see BUILD.md" >&2
     exit 1
 fi
 

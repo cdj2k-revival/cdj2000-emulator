@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -54,6 +55,10 @@ def build_plugin(tmp_path):
     else:
         plugin = tmp_path / "rangecount.so"
         command += ["-fPIC"]
+        if sys.platform == "darwin":
+            # Mach-O resolves undefined symbols at link time unless told to
+            # leave QEMU's plugin API for the loader, as QEMU's own build does.
+            command += ["-undefined", "dynamic_lookup"]
     subprocess.run(command + ["-o", str(plugin)], check=True)
     return plugin
 

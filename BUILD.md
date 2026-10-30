@@ -5,7 +5,9 @@
 
 ```sh
 sh scripts/build-bfin-sim.sh
-git clone --depth 1 https://gitlab.com/qemu-project/qemu.git /c/qemu-src
+git init /c/qemu-src && git -C /c/qemu-src fetch --depth 1 \
+    https://gitlab.com/qemu-project/qemu.git 55347990687e7bc5b6b0d624f290025726e8fbfa \
+    && git -C /c/qemu-src checkout FETCH_HEAD
 sh scripts/build-qemu-sh4.sh /c/qemu-src
 export CDJ_QEMU=/c/qemu-src/build/qemu-system-sh4
 ```
@@ -437,10 +439,13 @@ linked stock run 18% of a core at real time against gdb's 83% while starved.
 
 ## The MAIN board -- SH-4, from QEMU
 
-QEMU is not vendored here. Clone it wherever you like:
+QEMU is not vendored here. Fetch the revision the patches are made against,
+wherever you like:
 
 ```sh
-git clone --depth 1 https://gitlab.com/qemu-project/qemu.git /c/qemu-src
+git init /c/qemu-src && git -C /c/qemu-src fetch --depth 1 \
+    https://gitlab.com/qemu-project/qemu.git 55347990687e7bc5b6b0d624f290025726e8fbfa \
+    && git -C /c/qemu-src checkout FETCH_HEAD
 sh scripts/build-qemu-sh4.sh /c/qemu-src
 ```
 
@@ -449,7 +454,12 @@ The script applies `patches/qemu-sh-intc-priority-imask.patch`, copies
 not there, configures for `sh4-softmmu` only, and builds. All of it is
 idempotent, so re-run it after every change to `emulator/qemu/`.
 
-QEMU **11.x or newer** is required.
+The patches are kept against QEMU `55347990` (11.1.50), the revision the
+macOS notes below were measured on; all six apply to it cleanly and the board
+builds and boots stock firmware. Current `master` does not take them: QEMU
+removed `use_exit_tb()` from `target/sh4/translate.c` (`926d6cf4`,
+2026-09-23), and `qemu-sh-intc-priority-imask.patch` and
+`qemu-sh4-tcg-fast-paths.patch` both edit it (issue #41).
 
 Put the result on `PATH`, or point `CDJ_QEMU` at it:
 
@@ -510,6 +520,22 @@ the ones that read a real firmware image; see FIRMWARE.md. `tests/cstub/`
 compiles `emulator/qemu/cdj2000_input.c` on the host against stub QEMU headers,
 so the panel input protocol is tested without QEMU at all.
 
+The tests that start the board look for `qemu-system-sh4` on `PATH` or in
+`CDJ_QEMU`, and skip when it is in neither, so set it for a full run:
+
+```sh
+CDJ_QEMU=/c/qemu-src/build/qemu-system-sh4 pytest -q
+```
+
+The launchers (`view_vm`, `boot_vm`, `twoboard`) hand the GUI board a
+standalone status stream,
+`packets/status-standalone.bin`, which is generated, not shipped (DISC
+selected, nothing mounted):
+
+```sh
+python -m tools.cdj_gui.build_status_record packets/status-standalone.bin
+```
+
 ## Where things land
 
 | directory | holds | in git? |
@@ -531,11 +557,15 @@ Copy the board file and pass `--board` if you need it elsewhere.
 
 ## macOS migration
 
-The `develop` branch carries the macOS migration. Install Xcode
-Command Line Tools and Homebrew `make`, `gmp`, and `mpfr` before running
-`scripts/build-bfin-sim.sh`. On macOS the script uses `gmake`, BSD-compatible
-tar arguments, system zlib and Homebrew's arithmetic libraries. `CDJ_MAKE`
-can select another GNU make executable. Patch 03 fixes BSD sed module
+The macOS migration is on `main`. Install Xcode Command Line Tools and
+Homebrew `make`, `gmp`, and `mpfr` before running
+`scripts/build-bfin-sim.sh`; for QEMU, `meson`, `ninja`, `pkgconf`, `glib`
+and `pixman`; for the viewer, `python-tk@3.X` matching the Python the
+venv is made from. Installing `meson` can bring in a newer Homebrew Python
+and move `python3` to it, without Tk; name the version
+(`python3.14 -m venv .venv`) rather than relying on `python3`. On macOS the
+script uses `gmake`, BSD-compatible tar arguments, system zlib and Homebrew's
+arithmetic libraries. `CDJ_MAKE` can select another GNU make executable. Patch 03 fixes BSD sed module
 registration, Blackfin sign extension on LP64 hosts, and a missing POSIX
 header in SPORT socket handling. Applied-patch checksums are stored in the
 GDB source tree; changing a patch requires a fresh source tree.
