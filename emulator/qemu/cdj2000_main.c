@@ -5223,12 +5223,10 @@ static void cdj_sdram_fill(MemoryRegion *sdram, uint64_t size)
     }
     ram = memory_region_get_ram_ptr(sdram);
     if (!strncmp(spec, "random", 6) && (spec[6] == '\0' || spec[6] == ':')) {
-        uint64_t x = spec[6] == ':' ? strtoull(spec + 7, NULL, 0) : 1;
+        uint64_t seed = spec[6] == ':' ? strtoull(spec + 7, NULL, 0) : 1;
+        uint64_t x = seed ? seed : 1;   /* xorshift never leaves 0 */
         uint64_t i;
 
-        if (!x) {
-            x = 1;                      /* xorshift never leaves 0 */
-        }
         for (i = 0; i < size; i += 8) {
             uint64_t v;
 
@@ -5239,7 +5237,7 @@ static void cdj_sdram_fill(MemoryRegion *sdram, uint64_t size)
             memcpy(ram + i, &v, MIN(8, size - i));
         }
         qemu_log("cdj2000-main: SDRAM filled with random bytes, seed %" PRIu64
-                 " (CDJ_SDRAM_FILL)\n", spec[6] == ':' ? strtoull(spec + 7, NULL, 0) : 1);
+                 " (CDJ_SDRAM_FILL)\n", seed);
     } else {
         char *end;
         unsigned long v = strtoul(spec, &end, 16);

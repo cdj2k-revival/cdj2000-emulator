@@ -27,6 +27,7 @@ from tools.cdj_main.nxs_panel import neutral_frame
 from tools.cdj_main import media_readiness, panel_control
 from tools.cdj_main.qmp import connect_chardev
 from tools.cdj_main.parent_watch import Lifeline, watch
+from tools.cdj_gui.sim_fill import memory_fill_args
 from tools.paths import BFIN_SIM, GUI_RUN, QEMU, qemu_environment
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -1247,7 +1248,11 @@ def main():
         else:
             main_command += ['-enable-sync-profile', '-monitor',
                              f'telnet:{monitor_endpoint},server,nowait']
-    gui_command = [str(simulator), '--model', 'bf531', '--environment', 'operating', '--memory-region', '0,64M',
+    gui_fill = memory_fill_args(os.environ)
+    if gui_fill and args.gui_sim == 'fast':
+        parser.error('CDJ_GUI_SDRAM_FILL needs --gui-sim gdb: cdj-gui-run has no --memory-fill')
+    gui_command = [str(simulator), '--model', 'bf531', '--environment', 'operating', *gui_fill,
+        '--memory-region', '0,64M',
         '--hw-board-file', str(gui_board) if args.gui_firmware else 'emulator/cdj2000-gui-nxs.hw',
         str(gui_firmware / 'gui-boot-memory.elf')]
     if args.gui_sim == 'fast':
@@ -1289,6 +1294,8 @@ def main():
         main_env['CDJ_COSIM_QUANTUM_US'] = str(args.cosim_quantum_us)
     main_env['CDJ_PANEL_FRAME'] = args.panel_frame or neutral_frame().hex()
     main_env['CDJ_NXS_SD_LID'] = 'closed'
+    if os.environ.get('CDJ_SDRAM_FILL'):
+        main_env['CDJ_SDRAM_FILL'] = os.environ['CDJ_SDRAM_FILL']
     if args.trace_bus:
         main_env['CDJ_BUS_TRACE'] = '1'
     if args.sd_insert_seconds is not None:
