@@ -635,8 +635,10 @@ still have it.
 
 18. `18-gdb-17.2-bfin-memory-stalls.patch`: `BFIN_MEM_STALL=1` adds what the core waits for memory: every load,
     store and instruction fetch is classified by the CPLBs (cacheable or not) and run through a 16 KB I-cache and
-    a 16-32 KB D-cache; a miss costs `BFIN_STALL_FILL` cycles (default 90), an uncached SDRAM read `BFIN_STALL_RD`
+    a 16 KB D-cache; a miss costs `BFIN_STALL_FILL` cycles (default 90), an uncached SDRAM read `BFIN_STALL_RD`
     (45), an uncached or write-through write `BFIN_STALL_WR` (12), a flash access `BFIN_STALL_ASYNC` (40). The
     cycles go to the instruction that waited, so the virtual time base (and with it every timer, DMA and frame)
-    sees a slower core. `BFIN_STATS` prints a `STATS mem` line with the counters. Off by default, and then it costs
-    one test per access. Not modelled: SDRAM refresh and banks, DMA taking the bus, the write buffer.
+    sees a slower core; the wall-clock base follows the host and does not, and the simulator says so when it starts.
+    `BFIN_STATS` prints a `STATS mem` line with the counters. Off by default, and then it costs one test per access.
+    Not modelled: SDRAM refresh and banks, DMA taking the bus, the write buffer, dirty evictions, the guest's cache
+    flush and invalidate instructions.

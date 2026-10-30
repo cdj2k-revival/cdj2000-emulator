@@ -1,7 +1,6 @@
 BFIN_MEM_STALL=1: what the GUI core waits for memory, as a first-order model (cache misses and uncached SDRAM accesses).
 
-Off by default; with it, dv-bfin_mmu.c classifies every load, store and instruction fetch by the CPLBs and a 16 KB I-cache / 16-32 KB D-cache, and the cycles go to the instruction that waited (the virtual time base advances by them).  BFIN_STALL_FILL / _RD / _WR / _ASYNC / _MMR set the costs; BFIN_STATS adds a "STATS mem" line with the counters.
-
+Off by default; with it, dv-bfin_mmu.c classifies every load, store and instruction fetch by the CPLBs and a 16 KB I-cache / 16 KB D-cache, and the cycles go to the instruction that waited (the virtual time base advances by them).  BFIN_STALL_FILL / _RD / _WR / _ASYNC / _MMR set the costs; BFIN_STATS adds a "STATS mem" line with the counters.
 --- a/sim/bfin/bfin-sim.c
 +++ b/sim/bfin/bfin-sim.c
 @@ -9348,6 +9348,11 @@
@@ -18,38 +17,39 @@ Off by default; with it, dv-bfin_mmu.c classifies every load, store and instruct
    /* Set back to zero in case a pending CEC event occurs
 --- a/sim/bfin/bfin-sim.h
 +++ b/sim/bfin/bfin-sim.h
-@@ -441,6 +441,18 @@
-   return (f->ok >> ((supv << 1) | (unsigned) write)) & 1;
- }
+@@ -447,6 +447,19 @@
+ void bfin_prof_store (SIM_CPU *cpu, bu32 addr, const unsigned char *host,
+ 		      const void *value, int bytes);
  
 +/* BFIN_MEM_STALL=1: what the guest's loads, stores and instruction fetches cost in cycles beyond the one an
 +   instruction takes -- cache misses and uncached accesses to SDRAM (dv-bfin_mmu.c).  Off, the cost is this one
 +   test.  The pending cycles are added to CYCLE_DELAY when the instruction retires (bfin-sim.c).  */
 +extern int bfin_mem_stall_on;
 +extern bu32 bfin_stall_pending;
-+void bfin_mem_stall_access (SIM_CPU *cpu, bu32 addr, int bytes, bool write, bool inst);
-+#define BFIN_MEM_STALL(cpu, addr, bytes, write, inst) \
++void bfin_mem_stall_access (SIM_CPU *cpu, bu32 addr, bool write, bool inst);
++void bfin_mem_stall_report (FILE *stream);
++#define BFIN_MEM_STALL(cpu, addr, write, inst) \
 +do { \
 +  if (__builtin_expect (bfin_mem_stall_on, 0)) \
-+    bfin_mem_stall_access (cpu, addr, bytes, write, inst); \
++    bfin_mem_stall_access (cpu, addr, write, inst); \
 +} while (0)
 +
  #define __PUT_MEM(taddr, v, size) \
  do { \
    bu##size __v = (v); \
-@@ -462,6 +474,7 @@
+@@ -470,6 +483,7 @@
    bfin_trace_gui_state_write (cpu, __taddr, __v, __bytes); \
    if (__cnt != __bytes) \
      mmu_process_fault (cpu, __taddr, true, false, false, true); \
-+  BFIN_MEM_STALL (cpu, __taddr, __bytes, true, false); \
++  BFIN_MEM_STALL (cpu, __taddr, true, false); \
    BFIN_TRACE_CORE (cpu, __taddr, __bytes, write_map, __v); \
  } while (0)
  #define PUT_BYTE(taddr, v) __PUT_MEM(taddr, v, 8)
-@@ -489,6 +502,7 @@
+@@ -497,6 +511,7 @@
      bfin_trace_gui_state_read (cpu, __taddr, __ret, __bytes); \
    if (__cnt != __bytes) \
      mmu_process_fault (cpu, __taddr, false, inst, false, true); \
-+  BFIN_MEM_STALL (cpu, __taddr, __bytes, false, inst); \
++  BFIN_MEM_STALL (cpu, __taddr, false, inst); \
    BFIN_TRACE_CORE (cpu, __taddr, __bytes, map, __ret); \
    __ret; \
  })
@@ -72,47 +72,48 @@ Off by default; with it, dv-bfin_mmu.c classifies every load, store and instruct
  }
  
  const struct hw_descriptor dv_bfin_mmu_descriptor[] =
-@@ -844,4 +847,214 @@
- 	return;
+@@ -845,3 +848,209 @@
      }
    cec_exception (cpu, excp);
-+}
+ }
 +
 +/* BFIN_MEM_STALL=1: the cycles the guest spends waiting for memory.
 +
 +   The core takes one cycle an instruction, which is right for L1 SRAM and cache hits and far too fast for
-+   the Pioneer GUI, whose code and data live in SDRAM: a frame that costs about 2 million cycles here costs
++   the Pioneer GUI, whose code and data live in SDRAM: a frame that costs about 1 million cycles here costs
 +   about 12 million on the deck, and a lag that is only the GUI task running out of time never shows.  This is
 +   a first-order model of why, not a copy of the memory controller:
 +
 +   - the page's CPLB decides whether an access is cached (CPLB_L1_CHBL, with CPLB_WT for write-through) when
 +     the CPLBs are on; with them off everything external is uncached;
 +   - the instruction cache (IMEM_CONTROL.IMC) is 16 KB, 4-way, 32-byte lines; the data cache
-+     (DMEM_CONTROL.DMC) is 16 KB, 2-way, or 32 KB with both banks, LRU, write-back with write-allocate;
++     (DMEM_CONTROL.DMC) is 16 KB, 2-way (a BF531 has no Data B), LRU, write-back with write-allocate;
 +   - a miss costs BFIN_STALL_FILL cycles (a line fill from SDRAM), an uncached SDRAM read BFIN_STALL_RD, an
 +     uncached or write-through write BFIN_STALL_WR, an asynchronous bank (flash, 0x20000000) access
 +     BFIN_STALL_ASYNC; core and system MMRs BFIN_STALL_MMR (default 0);
 +   - instruction fetches are charged once per aligned 8 bytes (the fetch width).
 +
 +   Not modelled: the SDRAM refresh and bank state, DMA taking the bus (the display DMA is the biggest
-+   user), the write buffer's drain, the data cache's second bank's own arbitration.  The numbers are defaults
++   user), the write buffer's drain, dirty lines going back on an eviction, the guest's cache flush and
++   invalidate instructions.  The cycles slow the core only on a time base that counts them (virtual, insn):
++   the wall-clock base follows the host, and bfin_wall_init says so.  The numbers are defaults
 +   for a 400 MHz core and a 100 MHz 16-bit SDRAM (a line fill 90 cycles, an uncached read 45), to be tuned against
 +   a measurement on the deck: with them the GUI task of a playing deck costs about 2.8 million cycles a published
 +   frame instead of 1.0 million, which is still far from the 12 million the deck was measured at.  */
 +int bfin_mem_stall_on;
 +bu32 bfin_stall_pending;
-+uint64_t bfin_stall_total;
++static uint64_t bfin_stall_total;
 +static bu32 stall_fill = 90, stall_rd = 45, stall_wr = 12, stall_async = 40, stall_mmr = 0;
 +
 +#define STALL_WAYS_I 4
 +#define STALL_WAYS_D 2
 +#define STALL_SETS_I 128		/* 16 KB / 32 B / 4 ways */
-+#define STALL_SETS_D_MAX 512		/* 32 KB / 32 B / 2 ways */
++#define STALL_SETS_D 256		/* 16 KB / 32 B / 2 ways */
 +static bu32 icache_tag[STALL_SETS_I][STALL_WAYS_I];
-+static bu32 icache_age[STALL_SETS_I][STALL_WAYS_I];
-+static bu32 dcache_tag[STALL_SETS_D_MAX][STALL_WAYS_D];
-+static bu32 dcache_age[STALL_SETS_D_MAX][STALL_WAYS_D];
-+static bu32 stall_clock;
++static uint64_t icache_age[STALL_SETS_I][STALL_WAYS_I];
++static bu32 dcache_tag[STALL_SETS_D][STALL_WAYS_D];
++static uint64_t dcache_age[STALL_SETS_D][STALL_WAYS_D];
++static uint64_t stall_clock;
 +static bu32 stall_last_fetch = ~0u;
 +static uint64_t stall_hits[2], stall_misses[2], stall_uncached[2];
 +
@@ -141,13 +142,13 @@ Off by default; with it, dv-bfin_mmu.c classifies every load, store and instruct
 +	   stall_fill, stall_rd, stall_wr, stall_async, stall_mmr);
 +}
 +
-+/* The CPLB entry covering ADDR in table INST, or 0 (the CPLBs off, or no entry): its data word.  The last
-+   entry that matched is remembered, as the walk in _mmu_check_addr does.  */
++/* The CPLB entry covering ADDR in table INST, or 0 (the CPLBs off, or no entry): its data word.  The access
++   has just passed the permission check, so its entry is nearly always the one _mmu_check_addr remembers.  */
 +static bu32
 +stall_cplb_data (struct bfin_mmu *mmu, bool inst, bu32 addr)
 +{
 +  static const bu32 pages[4] = { 0x400, 0x1000, 0x100000, 0x400000 };
-+  static bu32 memo_lo[2], memo_hi[2], memo_data[2];
++  const struct bfin_cplb_memo *memo = &bfin_cplb_memo[inst];
 +  const bu32 *cplb_addr = inst ? &mmu->icplb_addr[0] : &mmu->dcplb_addr[0];
 +  const bu32 *cplb_data = inst ? &mmu->icplb_data[0] : &mmu->dcplb_data[0];
 +  bu32 control = inst ? mmu->imem_control : mmu->dmem_control;
@@ -155,8 +156,8 @@ Off by default; with it, dv-bfin_mmu.c classifies every load, store and instruct
 +
 +  if (!(control & ENCPLB))
 +    return 0;
-+  if (memo_hi[inst] && addr >= memo_lo[inst] && addr < memo_hi[inst])
-+    return memo_data[inst];
++  if (memo->valid && addr >= memo->lo && addr < memo->hi)
++    return memo->data;
 +  for (i = 0; i < 16; ++i)
 +    {
 +      bu32 hi;
@@ -165,19 +166,14 @@ Off by default; with it, dv-bfin_mmu.c classifies every load, store and instruct
 +	continue;
 +      hi = cplb_addr[i] + pages[(cplb_data[i] & PAGE_SIZE) >> 16];
 +      if (addr >= cplb_addr[i] && addr < hi)
-+	{
-+	  memo_lo[inst] = cplb_addr[i];
-+	  memo_hi[inst] = hi;
-+	  memo_data[inst] = cplb_data[i];
-+	  return cplb_data[i];
-+	}
++	return cplb_data[i];
 +    }
 +  return 0;
 +}
 +
 +/* One lookup in a set-associative LRU cache: 0 for a hit, 1 for a miss (the line is then installed).  */
 +static int
-+stall_cache_lookup (bu32 *tags, bu32 *ages, int ways, bu32 line)
++stall_cache_lookup (bu32 *tags, uint64_t *ages, int ways, bu32 line)
 +{
 +  int way, victim = 0;
 +
@@ -196,7 +192,7 @@ Off by default; with it, dv-bfin_mmu.c classifies every load, store and instruct
 +}
 +
 +void
-+bfin_mem_stall_access (SIM_CPU *cpu, bu32 addr, int bytes, bool write, bool inst)
++bfin_mem_stall_access (SIM_CPU *cpu, bu32 addr, bool write, bool inst)
 +{
 +  struct bfin_mmu *mmu;
 +  bu32 cost = 0, data, line;
@@ -204,7 +200,7 @@ Off by default; with it, dv-bfin_mmu.c classifies every load, store and instruct
 +
 +  if (addr >= 0xFF800000)
 +    {
-+      if (addr >= 0xFFC00000 || (addr >= 0xFFE00000))
++      if (addr >= BFIN_SYSTEM_MMR_BASE)
 +	cost = stall_mmr;
 +      goto done;			/* L1 SRAM: no wait */
 +    }
@@ -216,6 +212,11 @@ Off by default; with it, dv-bfin_mmu.c classifies every load, store and instruct
 +	return;
 +      stall_last_fetch = group;
 +    }
++  if (addr >= BFIN_ASYNC_BASE)
++    {
++      cost = stall_async;		/* flash and the other asynchronous banks are not cached here */
++      goto done;
++    }
 +  mmu = MMU_STATE (cpu);
 +  data = stall_cplb_data (mmu, inst, addr);
 +  cached = (data & CPLB_L1_CHBL) != 0;
@@ -224,12 +225,7 @@ Off by default; with it, dv-bfin_mmu.c classifies every load, store and instruct
 +      if (inst)
 +	cached = (mmu->imem_control & MC) != 0;
 +      else
-+	cached = (mmu->dmem_control & 0xc) != 0;
-+    }
-+  if (addr >= 0x20000000)
-+    {
-+      cost = stall_async;		/* flash and the other asynchronous banks are not cached here */
-+      goto done;
++	cached = (mmu->dmem_control & DMC_ACACHE_BSRAM) != 0;
 +    }
 +  if (!cached)
 +    {
@@ -258,8 +254,7 @@ Off by default; with it, dv-bfin_mmu.c classifies every load, store and instruct
 +    }
 +  else
 +    {
-+      bu32 sets = (mmu->dmem_control & 0xc) == 0xc ? STALL_SETS_D_MAX : STALL_SETS_D_MAX / 2;
-+      bu32 set = line & (sets - 1);
++      bu32 set = line & (STALL_SETS_D - 1);
 +
 +      if (stall_cache_lookup (dcache_tag[set], dcache_age[set], STALL_WAYS_D, line))
 +	{
@@ -286,18 +281,10 @@ Off by default; with it, dv-bfin_mmu.c classifies every load, store and instruct
 +	   (unsigned long long) stall_uncached[0], (unsigned long long) stall_hits[1],
 +	   (unsigned long long) stall_misses[1], (unsigned long long) stall_uncached[1]);
 +  fputc ('\n', stream);
- }
++}
 --- a/sim/bfin/interp.c
 +++ b/sim/bfin/interp.c
-@@ -766,6 +766,7 @@
-   unsigned long last_events;
- };
- static struct bfin_stats bfin_stats;
-+extern void bfin_mem_stall_report (FILE *);	/* dv-bfin_mmu.c */
- 
- double
- bfin_wall_seconds (void)
-@@ -919,6 +920,7 @@
+@@ -919,6 +919,7 @@
  	       bfin_wall.parked_s,
  	       (double) bfin_wall.dropped / bfin_wall.cclk_hz * 1e3,
  	       bfin_wall.waits, bfin_wall.spins);
@@ -305,3 +292,13 @@ Off by default; with it, dv-bfin_mmu.c classifies every load, store and instruct
        bfin_cosim_stats ();
        fflush (stderr);
        bfin_stats.last_wall = now;
+@@ -1427,6 +1428,9 @@
+ 	   bfin_wall.active ? "wall" : bfin_wall.virt ? "virtual" : "insn",
+ 	   bfin_wall.cclk_hz / 1e6,
+ 	   bfin_wall.ppi_fps, bfin_wall.sport_retry_us, bfin_wall.lag_cap);
++  if (bfin_wall.active && bfin_mem_stall_on)
++    fprintf (stderr, "bfin mem stall: counted, but the wall-clock time base follows the host and the core does"
++	     " not slow; use BFIN_TIME_BASE=virtual or insn, or a co-simulation\n");
+   fflush (stderr);
+   if (bfin_cosim_enabled ())
+     bfin_cosim_connect (sd);

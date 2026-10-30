@@ -187,13 +187,19 @@ off by default:
 
     python -m tools.cdj_main.cosim_scenario ... --gui-env BFIN_MEM_STALL=1
 
-Loads, stores and fetches go through the CPLBs (cacheable or not) and a 16 KB I-cache and a 16-32 KB D-cache; a
+Loads, stores and fetches go through the CPLBs (cacheable or not) and a 16 KB I-cache and a 16 KB D-cache; a
 miss costs `BFIN_STALL_FILL` cycles (default 90), an uncached SDRAM read `BFIN_STALL_RD` (45), an uncached or
 write-through write `BFIN_STALL_WR` (12), a flash access `BFIN_STALL_ASYNC` (40), a core or system MMR
 `BFIN_STALL_MMR` (0).  The `STATS mem` line of the GUI log (`BFIN_STATS` is on in `cosim_scenario`) counts hits,
-misses and uncached accesses of both caches and the stall cycles.  Busy time of the core is
+misses and uncached accesses of both caches and the stall cycles; a write-through write counts as uncached, a flash
+or MMR access is in the stall cycles only, and a fetch is counted once per 8 bytes.  Busy time of the core is
 `1 - parked_s / guest_s` in the `STATS wall` line; a cost per published frame is
 `(guest_s - parked_s) * 400e6 / published`.
+
+The waits slow the core only on a time base that counts them, and `cosim_scenario` runs on the virtual one.  On the
+default wall-clock base (`boot_vm`, `twoboard` and `nxs_vm` without `--cosim`) guest time follows the host: the
+counters run, nothing slows, and the simulator says so when it starts.  Not modelled, besides the bus: dirty lines
+going back on an eviction, and the guest's cache flush and invalidate instructions.
 
 Measured on the stock GUI with a track playing (card-camp836, 30 s of play): off 7 % busy, 1.0 million cycles a
 published frame; the defaults 19 %, 2.8 million; fill 200 / read 100 / write 30, 35 %, 5.4 million.  The deck's
