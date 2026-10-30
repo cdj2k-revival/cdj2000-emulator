@@ -12,7 +12,8 @@ what a stick carries:
   base is the one-song export in that project's test data; its track, artists,
   album, key, artwork and playlist are deleted (presence bit cleared, exactly
   how rekordbox deletes) and the playlists' tracks are appended.
-* `PIONEER/USBANLZ/P001/0000000N/ANLZ0000.{DAT,EXT,2EX}` -- copied from the
+* `PIONEER/USBANLZ/Pnnn/NNNNNNNN/ANLZ0000.{DAT,EXT,2EX}` -- the folder the
+  player derives from the file's path (`anlz_dir`); copied from the
   desktop analysis, with the `PPTH` tag rewritten from rekordbox's local
   placeholder (`?/name.mp3`) to the file's path on the card, as the export does.
 * `Contents/<artist>/<album>/<file>` -- the audio itself.
@@ -105,6 +106,28 @@ def rewrite_ppth(data: bytes, card_path: str) -> bytes:
     return bytes(out)
 
 
+def anlz_dir(card_path: str) -> str:
+    """The analysis folder MAIN 4.33 opens for CARD_PATH.
+
+    MAIN does not read the track row's analyze_path: it hashes the file path
+    (0x04258214, over UTF-16 code units, mod 200003) and builds
+    `P%03X/%08X` from that number (0x042596ee; the P folder is bits
+    0,2,6,7,9,13,16 of it).  It is the folder rekordbox writes: all 12
+    tracks of rekordbox-pdb's bigger-export.pdb agree.  With any other folder
+    MAIN never opens the DAT, answers the GUI's overview request with an
+    empty record (console `♪WAVE[0,0]`) and has no beat grid: the track
+    loads with a flat overview and an empty BPM box."""
+    n = 0
+    units = card_path.encode("utf-16-le")
+    for unit in struct.unpack("<%dH" % (len(units) // 2), units):
+        n = ((n * 0x5BC9 + unit) * 0x93B5 + unit) & 0xFFFFFFFF
+    n %= 200003
+    folder = 0
+    for out_bit, in_bit in enumerate((0, 2, 6, 7, 9, 13, 16)):
+        folder |= (n >> in_bit & 1) << out_bit
+    return "/PIONEER/USBANLZ/P%03X/%08X" % (folder, n)
+
+
 def playlist_contents(db, names: list[str]) -> list[tuple[str, list]]:
     playlists = []
     for name in names:
@@ -156,17 +179,17 @@ def main(argv: list[str] | None = None) -> int:
             card_path = "/Contents/%s/%s/%s" % (safe(artist, "UnknownArtist"),
                                                 safe(album, "UnknownAlbum"), filename)
             number = len(track_ids) + 1
-            anlz_dir = "/PIONEER/USBANLZ/P%03X/%08X" % (1 + number // 256, number)
+            analysis = anlz_dir(card_path)
 
             destination = stick / card_path.lstrip("/")
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, destination)
             anlz = RB_SHARE / (content.AnalysisDataPath or "").lstrip("/")
-            (stick / anlz_dir.lstrip("/")).mkdir(parents=True)
+            (stick / analysis.lstrip("/")).mkdir(parents=True)
             for extension in ANLZ_EXTENSIONS:
                 original = anlz.with_suffix(extension)
                 if original.exists():
-                    (stick / anlz_dir.lstrip("/") / original.name).write_bytes(
+                    (stick / analysis.lstrip("/") / original.name).write_bytes(
                         rewrite_ppth(original.read_bytes(), card_path))
 
             track_ids[content.ID] = editor.add_track(
@@ -179,7 +202,7 @@ def main(argv: list[str] | None = None) -> int:
                 key=nfc(content.KeyName) or None,
                 label=nfc(content.LabelName) or None,
                 comment=nfc(content.Commnt),
-                analyze_path=anlz_dir + "/ANLZ0000.DAT",
+                analyze_path=analysis + "/ANLZ0000.DAT",
                 tempo=int(content.BPM or 0),
                 duration=int(content.Length or 0),
                 bitrate=int(content.BitRate or 0),
