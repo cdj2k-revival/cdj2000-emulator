@@ -99,8 +99,10 @@ def test_frame_reader_rejects_in_place_rewrite(tmp_path, monkeypatch):
     changed = SimpleNamespace(**{name: getattr(original, name) for name in
         ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns')})
     changed.st_mtime_ns += 1
-    monkeypatch.setattr(nxs_vm.os, 'fstat', Mock(side_effect=[original, changed]))
-    raw, metadata = nxs_vm.read_frame(path)
+    # Only around the call: this is the global os.fstat, and pytest's capture uses it when the test ends.
+    with monkeypatch.context() as patched:
+        patched.setattr(nxs_vm.os, 'fstat', Mock(side_effect=[original, changed]))
+        raw, metadata = nxs_vm.read_frame(path)
     assert raw is None and metadata['status'] == 'changed_during_read'
 
 
