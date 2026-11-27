@@ -95,6 +95,8 @@ static const unsigned count_bits[4][2] = { { 8, 8 }, { 16, 8 }, { 8, 16 } };
 #define MAX_AUDIO               0
 #define AUDIO_FRAMES            16
 #define AUDIO_NS_PER_HALF       (AUDIO_FRAMES * 1000000000ull / 44100)
+/* A late half is caught up on the DSP's clock up to this far behind. */
+#define AUDIO_RESYNC_NS         (20 * 1000 * 1000)
 
 static const unsigned audio_events[] = { 6, 8 };
 
@@ -325,6 +327,13 @@ void cdj_dmax_audio_run(CdjDmax *d, int64_t dsp_ns)
          * a late core never moves the audio, or the position it plays, off
          * the DSP's clock for good (it used to, by the whole wait). */
         d->audio_deadline_ns += AUDIO_NS_PER_HALF;
+        /* After a long stall (a core that served nothing for a while) the
+         * missed halves are not replayed back to back, which would run the
+         * audio faster than 44.1 kHz until caught up: the clock restarts
+         * where the core is. */
+        if (dsp_ns - d->audio_deadline_ns > AUDIO_RESYNC_NS) {
+            d->audio_deadline_ns = dsp_ns + AUDIO_NS_PER_HALF;
+        }
     }
 }
 

@@ -49,5 +49,10 @@ int main(void)
     n = halves(1000, 2, &late);
     assert(late > 0);
     assert(n == on_time);
+    /* A core 100 ms late: the missed halves are not replayed faster than
+     * 44.1 kHz; the clock restarts where the core is, about 100 ms short. */
+    n = halves(1000, 100, &late);
+    assert(n < on_time - (uint64_t)(90000000 / half));
+    assert(n > on_time - (uint64_t)(110000000 / half));
     return 0;
 }
